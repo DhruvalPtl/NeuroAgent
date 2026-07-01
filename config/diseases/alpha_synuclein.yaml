@@ -1,0 +1,54 @@
+# =============================================================================
+# alpha_synuclein.yaml — Disease config: Alpha-Synuclein
+# Schema version: 1.0  (see config/_schema.yaml for field definitions)
+# =============================================================================
+# DATA STATUS: Real values populated — wet-lab CSVs expected under
+#              data/raw/alpha_synuclein/. This is the only disease config
+#              with real data in Milestone 1.
+# =============================================================================
+
+schema_version: "1.0"
+
+# ------------------------------------------------------------------
+# Identity
+# ------------------------------------------------------------------
+name: "alpha_synuclein"
+
+# ------------------------------------------------------------------
+# Data paths  (relative to repo root; append-only, timestamped CSVs)
+# ------------------------------------------------------------------
+raw_data_path: "data/raw/alpha_synuclein/"
+
+# ------------------------------------------------------------------
+# Column mappings  (must match actual CSV headers exactly)
+# ------------------------------------------------------------------
+sequence_column: "sequence"
+label_column: "aggregation_severity"
+
+# ------------------------------------------------------------------
+# Ordinal label schema  (index = integer label value, 0-indexed)
+# null at index 0 = "no aggregation"
+# Must be QWK-compatible: labels are contiguous integers 0 .. N-1
+# ------------------------------------------------------------------
+label_schema:
+  - null      # 0 — no aggregation / benign
+  - "Low"     # 1 — low aggregation propensity
+  - "Medium"  # 2 — moderate aggregation
+  - "High"    # 3 — high / pathological aggregation
+
+# ------------------------------------------------------------------
+# Post-translational modifications relevant to alpha-synuclein
+# The feature module generates one binary flag per entry — disease-
+# agnostic mechanism, disease-specific list.
+# ------------------------------------------------------------------
+ptm_types:
+  - "acetylation"       # N-terminal acetylation (Ac-Met1)
+  - "phosphorylation"   # S129 phosphorylation — key pathological marker
+
+# ------------------------------------------------------------------
+# Sequence-similarity splitting
+# 0.9 = sequences sharing >= 90% identity land in the same cluster.
+# Lenient threshold suitable for single-protein family variants
+# (point mutants, truncations of alpha-synuclein).
+# ------------------------------------------------------------------
+homology_cluster_threshold: 0.9

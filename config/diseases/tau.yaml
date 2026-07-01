@@ -1,0 +1,48 @@
+# =============================================================================
+# tau.yaml — Disease config: Tau (MAPT)
+# Schema version: 1.0  (see config/_schema.yaml for field definitions)
+# =============================================================================
+# DATA STATUS: Empty template — no wet-lab data available yet.
+#              Populate all null/placeholder values when tau data arrives.
+#              Adding a filled tau config + raw data = zero code changes
+#              to any .py file in the platform (architecture is data-driven).
+# =============================================================================
+
+schema_version: "1.0"
+
+# ------------------------------------------------------------------
+# Identity
+# ------------------------------------------------------------------
+name: "tau"
+
+# ------------------------------------------------------------------
+# Data paths  (update when tau CSVs are available)
+# ------------------------------------------------------------------
+raw_data_path: "data/raw/tau/"
+
+# ------------------------------------------------------------------
+# Column mappings  (update to match tau CSV headers)
+# ------------------------------------------------------------------
+sequence_column: null        # placeholder — set to actual column name
+label_column: null           # placeholder — set to actual column name
+
+# ------------------------------------------------------------------
+# Ordinal label schema
+# Tau aggregation may use different severity labels; update list to
+# reflect the actual label vocabulary in the tau dataset.
+# ------------------------------------------------------------------
+label_schema:
+  - null        # 0 — placeholder
+  - null        # 1 — placeholder
+  - null        # 2 — placeholder
+  - null        # 3 — placeholder
+
+# ------------------------------------------------------------------
+# PTMs relevant to tau (known candidates; confirm with wet-lab team)
+# ------------------------------------------------------------------
+ptm_types: []   # placeholder — e.g. phosphorylation, ubiquitination, acetylation
+
+# ------------------------------------------------------------------
+# Sequence-similarity splitting
+# ------------------------------------------------------------------
+homology_cluster_threshold: null   # placeholder — choose 0.3–0.9 based on tau variant diversity

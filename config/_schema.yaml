@@ -1,0 +1,104 @@
+# =============================================================================
+# _schema.yaml — Disease Config Schema Documentation
+# =============================================================================
+# Every file under config/diseases/ MUST provide all fields listed here.
+# This file is documentation only; it is not enforced programmatically yet
+# (enforcement is added in src/ingest). No disease-specific logic belongs
+# in any .py file — disease identity lives entirely in these yaml files.
+# =============================================================================
+
+schema_version: "1.0"
+
+fields:
+
+  name:
+    type: string
+    required: true
+    description: >
+      Human-readable disease / protein name. Used for display, logging,
+      and SQLite experiment records. Must be a valid Python identifier
+      fragment (no spaces; use underscores).
+    example: "alpha_synuclein"
+
+  raw_data_path:
+    type: string
+    required: true
+    description: >
+      Relative path (from repo root) to the directory where wet-lab CSV
+      files are deposited. Files inside are append-only and timestamped.
+      The ingest module scans this directory — it must exist at runtime.
+    example: "data/raw/alpha_synuclein/"
+
+  sequence_column:
+    type: string
+    required: true
+    description: >
+      Name of the column in every raw CSV that holds the amino-acid
+      sequence string. Ingest will reject files missing this column.
+    example: "sequence"
+
+  label_column:
+    type: string
+    required: true
+    description: >
+      Name of the column holding the ordinal aggregation-severity label.
+      Values must map to integers 0-3 (or 0-(N-1) for N classes).
+      Required for QWK compatibility.
+    example: "aggregation_severity"
+
+  label_schema:
+    type: list[string | null]
+    required: true
+    description: >
+      Ordered list of label names, index = integer label value.
+      First element is always null (represents "no aggregation" /
+      class 0). Length determines number of classes.
+      Used by metrics.py to label confusion-matrix axes.
+    example:
+      - null    # 0 — no aggregation
+      - "Low"   # 1
+      - "Medium" # 2
+      - "High"  # 3
+
+  ptm_types:
+    type: list[string]
+    required: true
+    description: >
+      List of post-translational modification (PTM) types relevant to
+      this disease. The feature-engineering module generates one binary
+      flag per PTM type from this list — entirely driven by this field,
+      never hardcoded in /src/features. An empty list [] is valid
+      (no PTM features will be generated).
+    example:
+      - "acetylation"
+      - "phosphorylation"
+
+  homology_cluster_threshold:
+    type: float  # range: 0.0 – 1.0
+    required: true
+    description: >
+      Sequence-identity threshold (0–1) passed to the clustering step in
+      src/splitting. Sequences within this identity of each other are
+      placed in the same cluster; clusters are then split across
+      train/val/test to prevent homology leakage.
+      Typical values: 0.3 (stringent) to 0.9 (lenient).
+    example: 0.9
+
+# =============================================================================
+# Optional / reserved fields (not required in Milestone 1):
+# =============================================================================
+#
+#   known_homolog_clusters:
+#     type: list[string]
+#     description: >
+#       Pre-computed cluster IDs (e.g. from UniRef) to use instead of
+#       running clustering from scratch. If absent, clustering runs on
+#       the raw sequences at split time.
+#
+#   approved_llm_endpoint:
+#     type: string
+#     description: >
+#       URL of the only network endpoint code_auditor.py permits.
+#       Defaults to platform-level config if omitted.
+#
+# =============================================================================

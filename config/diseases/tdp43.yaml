@@ -1,0 +1,48 @@
+# =============================================================================
+# tdp43.yaml — Disease config: TDP-43 (TARDBP)
+# Schema version: 1.0  (see config/_schema.yaml for field definitions)
+# =============================================================================
+# DATA STATUS: Empty template — no wet-lab data available yet.
+#              Populate all null/placeholder values when TDP-43 data arrives.
+#              Adding a filled tdp43 config + raw data = zero code changes
+#              to any .py file in the platform (architecture is data-driven).
+# =============================================================================
+
+schema_version: "1.0"
+
+# ------------------------------------------------------------------
+# Identity
+# ------------------------------------------------------------------
+name: "tdp43"
+
+# ------------------------------------------------------------------
+# Data paths  (update when TDP-43 CSVs are available)
+# ------------------------------------------------------------------
+raw_data_path: "data/raw/tdp43/"
+
+# ------------------------------------------------------------------
+# Column mappings  (update to match TDP-43 CSV headers)
+# ------------------------------------------------------------------
+sequence_column: null        # placeholder — set to actual column name
+label_column: null           # placeholder — set to actual column name
+
+# ------------------------------------------------------------------
+# Ordinal label schema
+# TDP-43 aggregation severity labels; update to match wet-lab
+# labeling convention for this protein.
+# ------------------------------------------------------------------
+label_schema:
+  - null        # 0 — placeholder
+  - null        # 1 — placeholder
+  - null        # 2 — placeholder
+  - null        # 3 — placeholder
+
+# ------------------------------------------------------------------
+# PTMs relevant to TDP-43 (known candidates; confirm with wet-lab team)
+# ------------------------------------------------------------------
+ptm_types: []   # placeholder — e.g. phosphorylation, ubiquitination, sumoylation
+
+# ------------------------------------------------------------------
+# Sequence-similarity splitting
+# ------------------------------------------------------------------
+homology_cluster_threshold: null   # placeholder — choose 0.3–0.9 based on TDP-43 variant diversity
