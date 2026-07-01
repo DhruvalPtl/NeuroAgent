@@ -239,6 +239,14 @@ def _reshape_wide_to_long(df: pd.DataFrame) -> pd.DataFrame:
     else:
         long_df.insert(0, "sequence_id", long_df.index)
 
+    # Clean peptide_sequence: collapse embedded whitespace/newlines
+    # (data-entry artifact in some lab files, e.g. "ACDEF\nGHI" → "ACDEFGHI")
+    long_df["peptide_sequence"] = (
+        long_df["peptide_sequence"].astype(str)
+        .str.replace(r"\s+", "", regex=True)
+        .str.strip()
+    )
+
     # Normalise label strings: strip outer whitespace, collapse internal
     # whitespace/newline artifacts (e.g. "Medi\num" → "Medium", "Medi um" → "Medium")
     long_df["label_raw"] = (
