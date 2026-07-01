@@ -62,9 +62,17 @@ CREATE TABLE IF NOT EXISTS experiments (
     git_commit              TEXT    NOT NULL DEFAULT 'unknown',
     status                  TEXT    NOT NULL DEFAULT 'completed',
     hypothesis_debate_json  TEXT,
-    code_diff_summary       TEXT
+    code_diff_summary       TEXT,
+    error_message           TEXT
 );
 """
+
+# Additive migrations — each is a guarded ALTER TABLE that is a no-op if the
+# column already exists.  SQLite has no "ADD COLUMN IF NOT EXISTS" syntax, so
+# we catch the OperationalError that signals the column already exists.
+_DDL_MIGRATIONS: list[str] = [
+    "ALTER TABLE experiments ADD COLUMN error_message TEXT;",
+]
 
 _REQUIRED_FIELDS = frozenset({
     "disease",
@@ -96,6 +104,7 @@ def init_db(db_path: str = "tracking/neuroagent.db") -> None:
     with _connect(db_path) as conn:
         conn.executescript(_DDL)
         conn.commit()
+        _run_migrations(conn)
     logger.info("init_db: schema initialised at %r", db_path)
 
 
@@ -280,3 +289,25 @@ def _fetch_git_commit() -> str:
         pass
     logger.warning("_fetch_git_commit: could not determine HEAD commit.")
     return "unknown"
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive schema migrations idempotently.
+
+    Each statement in _DDL_MIGRATIONS is executed once.  If the column
+    already exists, SQLite raises OperationalError("duplicate column name:
+    …") which we catch and ignore — this makes the function safe to call on
+    both fresh and existing databases.
+    """
+    for sql in _DDL_MIGRATIONS:
+        try:
+            conn.execute(sql)
+            conn.commit()
+            logger.debug("Migration applied: %s", sql.strip())
+        except sqlite3.OperationalError as exc:
+            # "duplicate column name" → column already exists, skip
+            if "duplicate column" in str(exc).lower():
+                logger.debug("Migration already applied (skipping): %s", sql.strip())
+            else:
+                raise
+
