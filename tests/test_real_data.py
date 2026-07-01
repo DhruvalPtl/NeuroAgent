@@ -188,7 +188,8 @@ class TestLoadRealLabFile:
     """Integration tests against the actual wet-lab Excel file."""
 
     @pytest.fixture(scope="class")
-    def real_df(self):
+    @classmethod
+    def real_df(cls):
         return load_real_peptide_data(str(_REAL_FILE), config_path=_CONFIG_PATH)
 
     def test_long_format_columns(self, real_df):

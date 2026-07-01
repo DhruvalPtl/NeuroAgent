@@ -7,3 +7,4 @@ langgraph
 streamlit
 python-Levenshtein
 pytest
+openpyxl

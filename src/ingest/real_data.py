@@ -150,12 +150,17 @@ def _load_config(config_path: str) -> dict[str, Any]:
 
 
 def _read_file(filepath: str) -> pd.DataFrame:
-    """Read .xlsx or .csv into a DataFrame based on file extension."""
+    """Read .xlsx or .csv into a DataFrame based on file extension.
+
+    Real lab Excel files have 3 legend/notes rows before the actual
+    column header row, so we skip them with header=3.
+    CSV files are assumed to have headers on row 0.
+    """
     path = pathlib.Path(filepath)
     suffix = path.suffix.lower()
 
     if suffix == ".xlsx":
-        df = pd.read_excel(filepath, dtype=str)
+        df = pd.read_excel(filepath, header=3, dtype=str)
     elif suffix == ".csv":
         df = pd.read_csv(filepath, dtype=str)
     else:
@@ -164,8 +169,26 @@ def _read_file(filepath: str) -> pd.DataFrame:
             "Only .xlsx and .csv are accepted."
         )
 
-    # Normalise column names: strip whitespace
-    df.columns = [str(c).strip() for c in df.columns]
+    # Normalise column names:
+    #   - strip whitespace and newlines
+    #   - extract just the numeric concentration value from headers like
+    #     "0.1\nmg/ml", "0.25\nmg/ ml", "1 mg/ml" → "0.1", "0.25", "1"
+    #   - normalise "Sr No." → "sr_no", "Peptide sequence" → "peptide_sequence"
+    new_cols = []
+    for col in df.columns:
+        cleaned = str(col).strip().replace("\n", " ").replace("  ", " ")
+        # Extract leading number from concentration columns (e.g. "0.1 mg/ml" → "0.1")
+        import re
+        conc_match = re.match(r"^(\d+\.?\d*)\s*mg", cleaned, re.IGNORECASE)
+        if conc_match:
+            new_cols.append(conc_match.group(1))
+        elif cleaned.lower().startswith("sr"):
+            new_cols.append("sr_no")
+        elif "peptide" in cleaned.lower() or "sequence" in cleaned.lower():
+            new_cols.append("peptide_sequence")
+        else:
+            new_cols.append(cleaned)
+    df.columns = new_cols
     return df
 
 
@@ -216,9 +239,11 @@ def _reshape_wide_to_long(df: pd.DataFrame) -> pd.DataFrame:
     else:
         long_df.insert(0, "sequence_id", long_df.index)
 
-    # Normalise label strings: strip whitespace, title-case
+    # Normalise label strings: strip outer whitespace, collapse internal
+    # whitespace/newline artifacts (e.g. "Medi\num" → "Medium", "Medi um" → "Medium")
     long_df["label_raw"] = (
         long_df["label_raw"].astype(str).str.strip()
+        .str.replace(r"\s+", "", regex=True)   # collapse all whitespace/newlines
     )
     # Replace blank strings / "nan" with actual NaN so dropna works
     long_df["label_raw"] = long_df["label_raw"].replace(
