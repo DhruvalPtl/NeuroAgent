@@ -414,3 +414,109 @@ class TestFullHappyPath:
         ))
         passed, reason = audit_staged_experiment(path)
         assert passed, f"{model} with {hyperparams} should pass audit; reason: {reason}"
+
+
+# ===========================================================================
+# 9. _BOUNDS completeness — every registered param must have a bound entry
+# ===========================================================================
+
+class TestBoundsCompleteness:
+    """Regression guard: ensures _BOUNDS covers every param key exposed by
+    each model's get_params().
+
+    This test was introduced alongside the fail-closed change in Check 6
+    (Step 10.3-patch).  If a model gains a new hyperparameter without a
+    corresponding _BOUNDS entry, this test fails BEFORE the auditor silently
+    approves unbounded values — which was the exact bug this patch fixes.
+
+    Fix gaps by adding the missing entry to _BOUNDS, not by adjusting the test.
+    """
+
+    def test_all_registered_params_have_bounds(self):
+        """Every param key from get_params() must appear in _BOUNDS[model_name]."""
+        import agent.code_auditor as _ca
+        from src.models.registry import get_model as _get_model
+
+        missing: dict[str, list[str]] = {}
+
+        for model_name, model_bounds in _ca._BOUNDS.items():
+            try:
+                instance = _get_model(model_name)
+            except Exception as exc:
+                raise AssertionError(
+                    f"Could not instantiate {model_name!r} to retrieve get_params(): {exc}"
+                )
+
+            live_params = set(instance.get_params().keys())
+            bound_params = set(model_bounds.keys())
+            unbounded = live_params - bound_params
+
+            if unbounded:
+                missing[model_name] = sorted(unbounded)
+
+        assert not missing, (
+            "The following model params are exposed by get_params() but have NO entry "
+            "in _BOUNDS — add them before the auditor can approve tuning them:\n"
+            + "\n".join(
+                f"  {model}: {params}" for model, params in missing.items()
+            )
+        )
+
+    def test_bounds_does_not_contain_phantom_params(self):
+        """_BOUNDS must not contain keys that don't appear in get_params().
+
+        Phantom entries (stale after a rename/removal) waste review effort
+        and can cause false confidence.
+        """
+        import agent.code_auditor as _ca
+        from src.models.registry import get_model as _get_model
+
+        phantom: dict[str, list[str]] = {}
+
+        for model_name, model_bounds in _ca._BOUNDS.items():
+            try:
+                instance = _get_model(model_name)
+            except Exception as exc:
+                raise AssertionError(
+                    f"Could not instantiate {model_name!r} to retrieve get_params(): {exc}"
+                )
+
+            live_params  = set(instance.get_params().keys())
+            bound_params = set(model_bounds.keys())
+            extras = bound_params - live_params
+
+            if extras:
+                phantom[model_name] = sorted(extras)
+
+        assert not phantom, (
+            "The following _BOUNDS entries have no corresponding get_params() key "
+            "(phantom / stale entries — remove or rename them):\n"
+            + "\n".join(
+                f"  {model}: {params}" for model, params in phantom.items()
+            )
+        )
+
+    def test_fail_closed_on_param_with_no_bound(self, tmp_path, monkeypatch):
+        """Check 6 must FAIL (not skip) when a valid param has no _BOUNDS entry.
+
+        Simulates a future scenario where a new param is added to a model but
+        the developer forgets to add its bound to _BOUNDS.
+        """
+        import agent.code_auditor as _ca
+
+        # Temporarily remove 'n_estimators' bound for random_forest
+        original_bounds = dict(_ca._BOUNDS["random_forest"])
+        patched_bounds  = {k: v for k, v in original_bounds.items() if k != "n_estimators"}
+        monkeypatch.setitem(_ca._BOUNDS, "random_forest", patched_bounds)
+
+        path = _write_staged(tmp_path, _valid_payload(
+            model_name="random_forest",
+            hyperparams={"n_estimators": 200},
+        ))
+        passed, reason = audit_staged_experiment(path)
+
+        assert not passed, "Check 6 must fail when param has no bound"
+        assert "Check 6" in reason
+        assert "no defined safety bound" in reason
+        assert "n_estimators" in reason
+        assert "_BOUNDS" in reason   # message must point to the fix location

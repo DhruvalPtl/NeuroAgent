@@ -234,9 +234,15 @@ def audit_staged_experiment(staged_file_path: str) -> tuple[bool, str]:
     model_bounds = _BOUNDS.get(model_name, {})
     for param, value in hyperparams.items():
         if param not in model_bounds:
-            # No bound defined for this param — skip (conservative: don't block)
-            logger.debug("audit: no bounds defined for %s.%s — skipping", model_name, param)
-            continue
+            # Fail-closed: every param that passes Check 5 MUST have a bound entry.
+            # If a new param is added to a model's _PARAM_NAMES without a
+            # corresponding _BOUNDS entry, the auditor will reject it with a
+            # clear message telling the developer exactly what to add.
+            return False, (
+                f"Check 6 FAILED: {model_name}.{param} has no defined safety bound — "
+                f"add one to _BOUNDS in agent/code_auditor.py before this param "
+                f"can be tuned by the agent."
+            )
 
         bound = model_bounds[param]
 
