@@ -10,4 +10,5 @@ pytest
 openpyxl
 torch
 transformers
+anthropic
 
