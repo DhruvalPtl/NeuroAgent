@@ -143,42 +143,33 @@ class BaseModel(abc.ABC):
         self,
         df: "pd.DataFrame",
         disease_config: dict,
+        include_concentration: bool = True,
     ) -> "np.ndarray":
         """Encode a DataFrame into a feature matrix for this model.
 
         Default implementation delegates to
-        ``src.features.encoder.encode_features()`` — the 74-dimensional
-        tabular encoding (amino-acid composition + physicochemical properties
-        + PTM mask + concentration).  RandomForestModel and XGBoostModel
-        inherit this default with zero changes.
-
-        Override this method in subclasses that require a different feature
-        representation, e.g.:
-          - ESM-2 embeddings (fixed-length 1280-dim)
-          - BiLSTM raw token sequences
-          - Graph neural network node features
-
-        The pipeline calls this method on the model instance AFTER
-        registry.get_model() so each model type controls its own feature
-        extraction without any changes to pipeline.py.
+        ``src.features.encoder.encode_features()`` — the tabular encoding
+        (amino-acid composition + physicochemical properties + PTM mask,
+        optionally + concentration).
 
         Parameters
         ----------
-        df : pd.DataFrame
-            Long-format DataFrame (or max-label collapsed view) from the
-            data loading pipeline.
-        disease_config : dict
-            Parsed disease YAML (passed through for PTM type access, etc.)
+        include_concentration : bool, default True
+            Passed directly to the underlying encoder.  Set to False when
+            ``target_type='max_label'`` so the concentration dimension is
+            omitted rather than filled with a misleading 0.0 sentinel.
+            Output is 74-dim when True, 73-dim when False.
 
-        Returns
-        -------
-        np.ndarray
-            2-D float32 array of shape (n_samples, n_features).
+        Override this method in subclasses that require a different feature
+        representation, e.g. ESM-2 embeddings (1280-dim).
         """
         # Lazy import to avoid circular import at module load time
         from src.features import encoder as _encoder
         import pandas as _pd  # noqa: F401 (type hint only)
-        return _encoder.encode_features(df, disease_config)
+        return _encoder.encode_features(
+            df, disease_config,
+            include_concentration=include_concentration,
+        )
 
     def __repr__(self) -> str:
         params = ", ".join(f"{k}={v!r}" for k, v in self.get_params().items())

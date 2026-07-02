@@ -212,8 +212,15 @@ def run_experiment_once(
         # ------------------------------------------------------------------ #
         # Step 3b — Feature encoding (dispatched through model.encode_features)
         # ------------------------------------------------------------------ #
-        X_train: np.ndarray = model.encode_features(train_df, disease_config)
-        X_test:  np.ndarray = model.encode_features(test_df,  disease_config)
+        include_concentration: bool = (target_type == "per_concentration")
+        X_train: np.ndarray = model.encode_features(
+            train_df, disease_config,
+            include_concentration=include_concentration,
+        )
+        X_test:  np.ndarray = model.encode_features(
+            test_df, disease_config,
+            include_concentration=include_concentration,
+        )
         y_train: np.ndarray = train_df["label_ordinal"].values.astype(int)
         y_test:  np.ndarray = test_df["label_ordinal"].values.astype(int)
         logger.info(

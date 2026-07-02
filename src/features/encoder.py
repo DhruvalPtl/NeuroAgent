@@ -11,8 +11,9 @@ Pipeline per row:
   3. Aggregate variable-length → fixed-length:
        mean-pool + max-pool + std-pool over the sequence axis
        shape: (72,)  [24 features × 3 pooling ops]
-  4. Append row-level scalars: concentration (1), is_acetylated (1)
-       Final shape: (74,)
+   4. Append row-level scalars:
+        - target_type='per_concentration': concentration (1) + is_acetylated (1) → (74,)
+        - target_type='max_label':         is_acetylated only (1)               → (73,)
 
 The output vector length is IDENTICAL regardless of sequence length —
 this is the core correctness property that allows all sequences to be
@@ -92,11 +93,13 @@ _PER_RESIDUE_DIM: int = _N_AA + 3 + 1  # = 24
 # Pooling ops applied → 3
 _N_POOL_OPS: int = 3
 
-# Scalar features appended after pooling: concentration + is_acetylated
-_N_SCALARS: int = 2
+# Scalar features appended after pooling
+_N_SCALARS_WITH_CONC: int    = 2  # concentration + is_acetylated  (per_concentration)
+_N_SCALARS_WITHOUT_CONC: int = 1  # is_acetylated only             (max_label)
 
-# Total output vector length (fixed, independent of sequence length)
-FEATURE_VECTOR_LENGTH: int = _PER_RESIDUE_DIM * _N_POOL_OPS + _N_SCALARS  # = 74
+# Canonical output vector lengths
+FEATURE_VECTOR_LENGTH: int            = _PER_RESIDUE_DIM * _N_POOL_OPS + _N_SCALARS_WITH_CONC     # = 74
+FEATURE_VECTOR_LENGTH_NO_CONC: int    = _PER_RESIDUE_DIM * _N_POOL_OPS + _N_SCALARS_WITHOUT_CONC  # = 73
 
 
 # ---------------------------------------------------------------------------
@@ -105,52 +108,52 @@ FEATURE_VECTOR_LENGTH: int = _PER_RESIDUE_DIM * _N_POOL_OPS + _N_SCALARS  # = 74
 
 def encode_features(
     df: pd.DataFrame,
-    disease_config: dict,  # noqa: ARG001  (kept for API consistency)
+    disease_config: dict,             # noqa: ARG001 (kept for API consistency)
+    include_concentration: bool = True,
 ) -> np.ndarray:
     """Encode a long-format DataFrame into a fixed-length feature matrix.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Long-format DataFrame as returned by load_dataset(). Must contain
-        columns: [peptide_sequence, concentration, is_acetylated].
+        Long-format DataFrame as returned by load_dataset(). Must always
+        contain columns: [peptide_sequence, is_acetylated].
+        ``concentration`` is additionally required when
+        ``include_concentration=True``.
     disease_config : dict
         Disease YAML config.  Currently unused inside this function
         (PTM types from the config are reflected in the is_acetylated
         column already computed by the ingest layer), but kept in the
         signature for API consistency with the rest of the pipeline.
+    include_concentration : bool, default True
+        Controls which scalar features are appended after the 72-dim
+        pooled sequence embedding:
+
+        - ``True``  (target_type='per_concentration'):
+          Appends [concentration, is_acetylated].  Output shape: (n, 74).
+          concentration is at feature index 72, is_acetylated at 73.
+
+        - ``False`` (target_type='max_label'):
+          Omits concentration entirely.  Output shape: (n, 73).
+          is_acetylated shifts to feature index 72.
+          This avoids polluting the embedding with a 0.0 sentinel value
+          that would collide with a real low-dose observation.
 
     Returns
     -------
-    np.ndarray, shape (n_rows, FEATURE_VECTOR_LENGTH)
-        Each row is a fixed-length (74-dim) feature vector. dtype float32.
-        FEATURE_VECTOR_LENGTH == 74 regardless of input sequence length.
+    np.ndarray, shape (n_rows, 74) or (n_rows, 73)
+        Float32 feature matrix.  Shape depends on ``include_concentration``.
 
     Raises
     ------
     ValueError
         If required columns are missing from df.
     """
-    _check_required_columns(df)
-    # If concentration is absent (e.g. max_label derived view), fill with 0.0
-    # as a sentinel so the encoder produces a valid fixed-length vector.
-    # This is documented behaviour: the concentration feature will be 0.0 for
-    # all rows, which is a meaningful "no dose info" signal in the embedding.
-    if "concentration" not in df.columns:
-        import warnings as _warnings
-        _warnings.warn(
-            "encode_features: 'concentration' column missing. "
-            "Filling with 0.0 (max_label view sentinel). "
-            "Ensure this is intentional (target_type='max_label').",
-            UserWarning,
-            stacklevel=2,
-        )
-        df = df.copy()
-        df["concentration"] = 0.0
+    _check_required_columns(df, include_concentration=include_concentration)
     vectors = [
         _encode_row(
             sequence=row["peptide_sequence"],
-            concentration=float(row["concentration"]),
+            concentration=float(row["concentration"]) if include_concentration else None,
             is_acetylated=bool(row["is_acetylated"]),
         )
         for _, row in df.iterrows()
@@ -162,13 +165,15 @@ def encode_features(
 # Private helpers
 # ---------------------------------------------------------------------------
 
-_REQUIRED_COLS = ["peptide_sequence", "concentration", "is_acetylated"]
+_REQUIRED_COLS_BASE   = ["peptide_sequence", "is_acetylated"]
+_REQUIRED_COL_CONC    = "concentration"
 
 
-def _check_required_columns(df: pd.DataFrame) -> None:
-    # concentration is handled separately (may be filled with 0.0 for max_label)
-    _mandatory = [c for c in _REQUIRED_COLS if c != "concentration"]
-    missing = [c for c in _mandatory if c not in df.columns]
+def _check_required_columns(df: pd.DataFrame, include_concentration: bool = True) -> None:
+    required = list(_REQUIRED_COLS_BASE)
+    if include_concentration:
+        required.append(_REQUIRED_COL_CONC)
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             f"encode_features(): missing required columns: {missing}"
@@ -177,18 +182,26 @@ def _check_required_columns(df: pd.DataFrame) -> None:
 
 def _encode_row(
     sequence: str,
-    concentration: float,
+    concentration: float | None,
     is_acetylated: bool,
 ) -> np.ndarray:
-    """Encode a single peptide row to a fixed-length vector."""
+    """Encode a single peptide row to a fixed-length vector.
+
+    Parameters
+    ----------
+    concentration : float or None
+        Pass a float to include it as feature index 72 (74-dim output).
+        Pass None to omit it entirely (73-dim output, is_acetylated at 72).
+    """
     # ------------------------------------------------------------------ #
     # 1. PTM dual-stream: get clean sequence + position mask
     # ------------------------------------------------------------------ #
     clean_seq, ptm_mask = encode_ptm_map(sequence)
 
+    out_len = FEATURE_VECTOR_LENGTH if concentration is not None else FEATURE_VECTOR_LENGTH_NO_CONC
     if len(clean_seq) == 0:
         # Edge case: empty sequence — return zero vector
-        return np.zeros(FEATURE_VECTOR_LENGTH, dtype=np.float32)
+        return np.zeros(out_len, dtype=np.float32)
 
     seq_len = len(clean_seq)
 
@@ -226,10 +239,12 @@ def _encode_row(
     pooled = np.concatenate([mean_pool, max_pool, std_pool])  # (72,)
 
     # ------------------------------------------------------------------ #
-    # 4. Append row-level scalar features → (74,)
+    # 4. Append row-level scalar features
+    #    - include_concentration=True  → [concentration, is_acetylated] → (74,)
+    #    - include_concentration=False → [is_acetylated]                → (73,)
     # ------------------------------------------------------------------ #
-    scalars = np.array(
-        [concentration, float(is_acetylated)],
-        dtype=np.float32,
-    )
-    return np.concatenate([pooled, scalars])  # (74,)
+    if concentration is not None:
+        scalars = np.array([concentration, float(is_acetylated)], dtype=np.float32)
+    else:
+        scalars = np.array([float(is_acetylated)], dtype=np.float32)
+    return np.concatenate([pooled, scalars])

@@ -217,19 +217,85 @@ class TestMissingColumnGuard:
         with pytest.raises(ValueError, match="missing required columns"):
             encode_features(df, alpha_config)
 
-    def test_missing_concentration_warns_and_fills(self, alpha_config):
-        """Missing concentration column emits a warning and fills with 0.0.
-
-        This is the supported behaviour for the max_label derived view which
-        drops the concentration column (meaningless after collapsing).  The
-        encoder fills with 0.0 as a sentinel so feature vectors remain valid
-        and consistently shaped (74-dim).
-        """
+    def test_missing_concentration_with_include_true_raises(self, alpha_config):
+        """concentration absent + include_concentration=True (default) → ValueError."""
         df = pd.DataFrame({"peptide_sequence": ["ACDEF"], "is_acetylated": [False]})
-        with pytest.warns(UserWarning, match="concentration"):
-            result = encode_features(df, alpha_config)
-        assert result.shape == (1, 74)
+        with pytest.raises(ValueError, match="missing required columns"):
+            encode_features(df, alpha_config, include_concentration=True)
+
+    def test_missing_concentration_with_include_false_ok(self, alpha_config):
+        """concentration absent + include_concentration=False (max_label) → no error."""
+        df = pd.DataFrame({"peptide_sequence": ["ACDEF"], "is_acetylated": [False]})
+        result = encode_features(df, alpha_config, include_concentration=False)
+        assert result.shape == (1, 73)
         assert result.dtype == np.float32
+
+
+# ===========================================================================
+# 4b. 73/74-dim regression guard
+# ===========================================================================
+
+class TestDimRegression:
+    """Regression guard: per_concentration → 74-dim, max_label → 73-dim."""
+
+    def _make_single_row(self):
+        return pd.DataFrame({
+            "peptide_sequence": ["ACDEFGHIK"],
+            "concentration":    [1.0],
+            "is_acetylated":    [False],
+        })
+
+    def test_include_concentration_true_gives_74_dim(self, alpha_config):
+        """Default path (per_concentration): output must be 74-dim."""
+        X = encode_features(self._make_single_row(), alpha_config,
+                            include_concentration=True)
+        assert X.shape == (1, 74), f"expected (1,74), got {X.shape}"
+        assert X.dtype == np.float32
+
+    def test_include_concentration_false_gives_73_dim(self, alpha_config):
+        """max_label path: output must be 73-dim (no concentration column)."""
+        df = pd.DataFrame({
+            "peptide_sequence": ["ACDEFGHIK"],
+            "is_acetylated":    [False],
+        })
+        X = encode_features(df, alpha_config, include_concentration=False)
+        assert X.shape == (1, 73), f"expected (1,73), got {X.shape}"
+        assert X.dtype == np.float32
+
+    def test_is_acetylated_at_index_minus1_when_no_conc(self, alpha_config):
+        """With include_concentration=False, is_acetylated is the last feature."""
+        df_acetyl = pd.DataFrame({
+            "peptide_sequence": ["ACXEFGHIK"],
+            "is_acetylated":    [True],
+        })
+        df_plain  = pd.DataFrame({
+            "peptide_sequence": ["ACDEFGHIK"],
+            "is_acetylated":    [False],
+        })
+        X_a = encode_features(df_acetyl, alpha_config, include_concentration=False)
+        X_p = encode_features(df_plain,  alpha_config, include_concentration=False)
+        assert X_a[0, -1] == 1.0, "acetylated row should have 1.0 at last index"
+        assert X_p[0, -1] == 0.0, "plain row should have 0.0 at last index"
+
+    def test_concentration_not_in_73dim_vector(self, alpha_config):
+        """73-dim and 74-dim vectors from same peptide differ only by the concentration dim."""
+        df74 = pd.DataFrame({
+            "peptide_sequence": ["MNPQRST"],
+            "concentration":    [2.5],
+            "is_acetylated":    [False],
+        })
+        df73 = pd.DataFrame({
+            "peptide_sequence": ["MNPQRST"],
+            "is_acetylated":    [False],
+        })
+        X74 = encode_features(df74, alpha_config, include_concentration=True)
+        X73 = encode_features(df73, alpha_config, include_concentration=False)
+        # First 72 dims (sequence embedding) must be identical
+        assert np.allclose(X74[0, :72], X73[0, :72]), "sequence embedding must match"
+        # is_acetylated: at index 73 in 74-dim, at index 72 in 73-dim
+        assert X74[0, 73] == X73[0, 72], "is_acetylated value must be identical"
+        # concentration (index 72 in 74-dim) must NOT equal 0.0 (not a sentinel)
+        assert X74[0, 72] == pytest.approx(2.5, abs=1e-5), "concentration preserved"
 
 
 # ===========================================================================

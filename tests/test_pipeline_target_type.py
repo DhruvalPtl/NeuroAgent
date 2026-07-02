@@ -17,7 +17,9 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 import yaml
 
@@ -283,3 +285,58 @@ class TestInvalidTargetType:
         lb = get_leaderboard(db_path)
         # The ValueError is raised before the try/except block that writes to DB
         assert len(lb) == 0
+
+
+# ===========================================================================
+# 5. Feature matrix dimensionality — 74-dim for per_concentration, 73-dim for max_label
+# ===========================================================================
+
+class TestFeatureMatrixDim:
+    """Assert that include_concentration is wired correctly through the pipeline.
+
+    per_concentration  → X_train/X_test have 74 columns (conc at index 72)
+    max_label          → X_train/X_test have 73 columns (is_acetylated at 72)
+    """
+
+    def _run_and_capture_shapes(self, alpha_config, db_path, target_type):
+        """Run pipeline and capture (X_train.shape, X_test.shape) via mock."""
+        captured = {}
+
+        from src.models import random_forest as _rf_mod
+        original_fit = _rf_mod.RandomForestModel.fit
+
+        def _capture_fit(self_model, X, y):
+            captured["X_shape"] = X.shape
+            return original_fit(self_model, X, y)
+
+        with patch.object(_rf_mod.RandomForestModel, "fit", _capture_fit):
+            run_experiment_once(
+                disease_config=alpha_config,
+                model_name="random_forest",
+                db_path=db_path,
+                target_type=target_type,
+            )
+        return captured["X_shape"]
+
+    def test_per_concentration_x_has_74_cols(self, alpha_config, db_path):
+        """per_concentration: feature matrix must have 74 columns."""
+        shape = self._run_and_capture_shapes(alpha_config, db_path, "per_concentration")
+        assert shape[1] == 74, (
+            f"per_concentration X_train should be 74-dim, got {shape[1]}"
+        )
+
+    def test_max_label_x_has_73_cols(self, alpha_config, db_path):
+        """max_label: feature matrix must have 73 columns (no concentration dim)."""
+        shape = self._run_and_capture_shapes(alpha_config, db_path, "max_label")
+        assert shape[1] == 73, (
+            f"max_label X_train should be 73-dim, got {shape[1]}"
+        )
+
+    def test_col_counts_differ_by_exactly_one(self, alpha_config, db_path):
+        """The only structural difference is the concentration column."""
+        shape_conc = self._run_and_capture_shapes(alpha_config, db_path, "per_concentration")
+        shape_max  = self._run_and_capture_shapes(alpha_config, db_path, "max_label")
+        assert shape_conc[1] - shape_max[1] == 1, (
+            f"Expected exactly 1 column difference, "
+            f"got per_concentration={shape_conc[1]}, max_label={shape_max[1]}"
+        )
