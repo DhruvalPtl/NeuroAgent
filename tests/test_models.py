@@ -40,6 +40,7 @@ _CONFIG_PATH = str(_REPO_ROOT / "config" / "diseases" / "alpha_synuclein.yaml")
 # even when this file is run in isolation (e.g. pytest -k test_models).
 import src.models.random_forest    # noqa: F401 — side-effect: registers "random_forest"
 import src.models.xgboost_model    # noqa: F401 — side-effect: registers "xgboost"
+import src.models.esm2_coral       # noqa: F401 — side-effect: registers "esm2_coral"
 
 from src.models.registry import MODEL_REGISTRY, get_model, list_models
 from src.models.xgboost_model import _compute_sample_weights
@@ -96,8 +97,15 @@ def _synthetic_dataset(
 
 
 def _all_model_names() -> list[str]:
-    """Return sorted list of all registered model names."""
-    return sorted(MODEL_REGISTRY.keys())
+    """Return sorted list of registered model names that use tabular 74-dim input.
+
+    ESM2CoralModel is excluded here because it expects 325-dim input (ESM-2
+    embeddings) rather than the 74-dim tabular vectors used in the parametrised
+    synthetic-data tests below.  ESM2CoralModel's own fit/predict tests live in
+    tests/test_esm2_coral.py.
+    """
+    _TABULAR_MODELS = {"random_forest", "xgboost"}
+    return sorted(n for n in MODEL_REGISTRY if n in _TABULAR_MODELS)
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +115,8 @@ def _all_model_names() -> list[str]:
 class TestRegistry:
 
     def test_expected_models_registered(self):
-        """random_forest and xgboost must be in the registry."""
-        for expected in ["random_forest", "xgboost"]:
+        """random_forest, xgboost, and esm2_coral must be in the registry."""
+        for expected in ["random_forest", "xgboost", "esm2_coral"]:
             assert expected in MODEL_REGISTRY, (
                 f"{expected!r} is not in MODEL_REGISTRY. "
                 "Check @register_model decorator on the class."

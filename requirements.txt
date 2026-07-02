@@ -8,3 +8,6 @@ streamlit
 python-Levenshtein
 pytest
 openpyxl
+torch
+transformers
+

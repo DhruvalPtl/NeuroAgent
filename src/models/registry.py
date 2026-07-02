@@ -55,6 +55,7 @@ MODEL_REGISTRY: dict[str, type["BaseModel"]] = {}
 _MODEL_MODULES = [
     "src.models.random_forest",
     "src.models.xgboost_model",
+    "src.models.esm2_coral",
 ]
 
 
