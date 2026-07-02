@@ -2,10 +2,10 @@
 # tdp43.yaml — Disease config: TDP-43 (TARDBP)
 # Schema version: 1.0  (see config/_schema.yaml for field definitions)
 # =============================================================================
-# DATA STATUS: Empty template — no wet-lab data available yet.
-#              Populate all null/placeholder values when TDP-43 data arrives.
-#              Adding a filled tdp43 config + raw data = zero code changes
-#              to any .py file in the platform (architecture is data-driven).
+# DATA STATUS: Populated — data split from real_lab_batch_001.xlsx
+#              Sr No. 145-180.  Data lives at data/raw/tdp43/.
+#              Same label schema and PTM logic as alpha_synuclein
+#              (both proteins studied in the same wet-lab experiment).
 # =============================================================================
 
 schema_version: "1.0"
@@ -16,33 +16,39 @@ schema_version: "1.0"
 name: "tdp43"
 
 # ------------------------------------------------------------------
-# Data paths  (update when TDP-43 CSVs are available)
+# Data paths
 # ------------------------------------------------------------------
 raw_data_path: "data/raw/tdp43/"
 
 # ------------------------------------------------------------------
-# Column mappings  (update to match TDP-43 CSV headers)
+# Column mappings  (same as alpha_synuclein — same lab file format)
 # ------------------------------------------------------------------
-sequence_column: null        # placeholder — set to actual column name
-label_column: null           # placeholder — set to actual column name
+sequence_column: "sequence"
+label_column: "aggregation_severity"
 
 # ------------------------------------------------------------------
-# Ordinal label schema
-# TDP-43 aggregation severity labels; update to match wet-lab
-# labeling convention for this protein.
+# Ordinal label schema  (identical — same assay)
 # ------------------------------------------------------------------
 label_schema:
-  - null        # 0 — placeholder
-  - null        # 1 — placeholder
-  - null        # 2 — placeholder
-  - null        # 3 — placeholder
+  - null      # 0 — no aggregation / benign
+  - "Low"     # 1 — low aggregation propensity
+  - "Medium"  # 2 — moderate aggregation
+  - "High"    # 3 — high / pathological aggregation
 
 # ------------------------------------------------------------------
-# PTMs relevant to TDP-43 (known candidates; confirm with wet-lab team)
+# Post-translational modifications relevant to TDP-43
+# Phosphorylation of the C-terminal domain is the key pathological
+# marker.  Ubiquitination is also observed in ALS/FTLD inclusions.
+# Acetylation follows the same 'X' lab encoding as alpha_synuclein.
 # ------------------------------------------------------------------
-ptm_types: []   # placeholder — e.g. phosphorylation, ubiquitination, sumoylation
+ptm_types:
+  - "acetylation"       # K-acetylation (X marker in sequence)
+  - "phosphorylation"   # C-terminal domain phosphorylation (pS409/410)
+  - "ubiquitination"    # Ubiquitin-positive inclusions — ALS/FTLD marker
 
 # ------------------------------------------------------------------
 # Sequence-similarity splitting
+# Same threshold — variants are point mutants within TDP-43 peptide
+# fragments studied under the same lab protocol.
 # ------------------------------------------------------------------
-homology_cluster_threshold: null   # placeholder — choose 0.3–0.9 based on TDP-43 variant diversity
+homology_cluster_threshold: 0.9

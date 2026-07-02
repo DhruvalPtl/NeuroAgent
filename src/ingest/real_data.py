@@ -53,8 +53,12 @@ def load_real_peptide_data(
     -------
     pd.DataFrame
         Long-format DataFrame with columns:
-        [sequence_id, peptide_sequence, concentration, label_ordinal,
+        [sequence_id, sr_no, peptide_sequence, concentration, label_ordinal,
          is_acetylated]
+
+        ``sequence_id`` is the original Sr No. (renamed for pipeline
+        compatibility).  ``sr_no`` is a preserved copy of the same value
+        used by ``split_by_disease()`` to assign rows to proteins.
 
     Notes
     -----
@@ -123,7 +127,7 @@ def load_real_peptide_data(
     # 6. Final column selection & types
     # ------------------------------------------------------------------ #
     long_df = long_df[
-        ["sequence_id", "peptide_sequence", "concentration",
+        ["sequence_id", "sr_no", "peptide_sequence", "concentration",
          "label_ordinal", "is_acetylated"]
     ].copy()
 
@@ -233,11 +237,14 @@ def _reshape_wide_to_long(df: pd.DataFrame) -> pd.DataFrame:
         value_name="label_raw",
     )
 
-    # Rename sr_no → sequence_id; create it from index if absent
+    # Rename sr_no → sequence_id (pipeline compat); keep sr_no as its own
+    # column so split_by_disease() can filter by original Sr No. range.
     if id_col:
         long_df = long_df.rename(columns={"sr_no": "sequence_id"})
+        long_df["sr_no"] = long_df["sequence_id"]   # preserved copy
     else:
         long_df.insert(0, "sequence_id", long_df.index)
+        long_df["sr_no"] = long_df["sequence_id"]
 
     # Clean peptide_sequence: collapse embedded whitespace/newlines
     # (data-entry artifact in some lab files, e.g. "ACDEF\nGHI" → "ACDEFGHI")

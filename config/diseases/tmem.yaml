@@ -1,11 +1,11 @@
 # =============================================================================
-# tau.yaml — Disease config: Tau (MAPT)
+# tmem.yaml — Disease config: TMEM (Transmembrane protein aggregation)
 # Schema version: 1.0  (see config/_schema.yaml for field definitions)
 # =============================================================================
 # DATA STATUS: Populated — data split from real_lab_batch_001.xlsx
-#              Sr No. 101-144.  Data lives at data/raw/tau/.
+#              Sr No. 181-214.  Data lives at data/raw/tmem/.
 #              Same label schema and PTM logic as alpha_synuclein
-#              (both proteins studied in the same wet-lab experiment).
+#              (studied in the same wet-lab experiment, same assay).
 # =============================================================================
 
 schema_version: "1.0"
@@ -13,12 +13,12 @@ schema_version: "1.0"
 # ------------------------------------------------------------------
 # Identity
 # ------------------------------------------------------------------
-name: "tau"
+name: "tmem"
 
 # ------------------------------------------------------------------
 # Data paths
 # ------------------------------------------------------------------
-raw_data_path: "data/raw/tau/"
+raw_data_path: "data/raw/tmem/"
 
 # ------------------------------------------------------------------
 # Column mappings  (same as alpha_synuclein — same lab file format)
@@ -27,7 +27,7 @@ sequence_column: "sequence"
 label_column: "aggregation_severity"
 
 # ------------------------------------------------------------------
-# Ordinal label schema  (identical to alpha_synuclein — same assay)
+# Ordinal label schema  (identical — same assay)
 # ------------------------------------------------------------------
 label_schema:
   - null      # 0 — no aggregation / benign
@@ -36,17 +36,18 @@ label_schema:
   - "High"    # 3 — high / pathological aggregation
 
 # ------------------------------------------------------------------
-# Post-translational modifications relevant to tau
-# Tau hyperphosphorylation is the primary pathological marker.
-# Acetylation on 'X' residues follows the same lab encoding.
+# Post-translational modifications relevant to TMEM proteins
+# Transmembrane domain aggregation is influenced by glycosylation
+# and palmitoylation.  Acetylation follows the same 'X' lab encoding.
 # ------------------------------------------------------------------
 ptm_types:
   - "acetylation"       # K-acetylation (X marker in sequence)
-  - "phosphorylation"   # Hyperphosphorylation — tau hallmark (AT8, PHF-1 sites)
+  - "glycosylation"     # N-linked glycosylation — common in TM proteins
+  - "palmitoylation"    # Lipid modification influencing membrane anchoring
 
 # ------------------------------------------------------------------
 # Sequence-similarity splitting
-# Same threshold as alpha_synuclein — variants in this dataset are
-# point mutants of tau peptide fragments (same lab protocol).
+# Same threshold — variants are fragments of transmembrane domains
+# studied under the same lab protocol as the other proteins.
 # ------------------------------------------------------------------
 homology_cluster_threshold: 0.9

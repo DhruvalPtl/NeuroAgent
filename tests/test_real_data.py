@@ -102,7 +102,7 @@ class TestLoadRealPeptideDataSynthetic:
         cfg = _build_minimal_config()
         df = load_real_peptide_data(path, disease_config=cfg)
         assert set(df.columns) == {
-            "sequence_id", "peptide_sequence", "concentration",
+            "sequence_id", "sr_no", "peptide_sequence", "concentration",
             "label_ordinal", "is_acetylated"
         }
 
@@ -194,7 +194,7 @@ class TestLoadRealLabFile:
 
     def test_long_format_columns(self, real_df):
         assert set(real_df.columns) == {
-            "sequence_id", "peptide_sequence", "concentration",
+            "sequence_id", "sr_no", "peptide_sequence", "concentration",
             "label_ordinal", "is_acetylated"
         }
 
