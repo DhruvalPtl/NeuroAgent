@@ -58,7 +58,7 @@ logging.basicConfig(
 logger = logging.getLogger("fix_disease_split")
 
 from src.ingest.real_data import load_real_peptide_data
-from src.ingest.disease_split import split_by_disease, DEFAULT_SR_NO_RANGES
+from src.ingest.disease_split import split_by_disease, load_sr_no_ranges
 
 # ---------------------------------------------------------------------------
 # Config
@@ -73,6 +73,7 @@ OUTPUT_PATHS = {
 }
 
 CONFIG_PATH = _REPO_ROOT / "config" / "diseases" / "alpha_synuclein.yaml"
+RANGES_CONFIG = _REPO_ROOT / "config" / "sr_no_ranges.yaml"
 
 # Expected approximate peptide counts per disease (before x concentration)
 EXPECTED_PEPTIDE_APPROX = {
@@ -84,6 +85,17 @@ EXPECTED_PEPTIDE_APPROX = {
 
 
 def main() -> None:
+    # ------------------------------------------------------------------
+    # 0. Load Sr No. ranges from config (not hardcoded)
+    # ------------------------------------------------------------------
+    ranges = load_sr_no_ranges(str(RANGES_CONFIG))
+    logger.info("Loaded Sr No. ranges: %s", ranges)
+
+    # Derive OUTPUT_PATHS dynamically from ranges
+    output_paths: dict[str, pathlib.Path] = {
+        disease: _REPO_ROOT / "data" / "raw" / disease / "real_lab_batch_001.xlsx"
+        for disease in ranges
+    }
     # ------------------------------------------------------------------
     # 1. Load combined file
     # ------------------------------------------------------------------
@@ -105,8 +117,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 2. Split by Sr No. range
     # ------------------------------------------------------------------
-    logger.info("Splitting by Sr No. ranges: %s", DEFAULT_SR_NO_RANGES)
-    splits = split_by_disease(df, sr_no_ranges=DEFAULT_SR_NO_RANGES)
+    logger.info("Splitting by Sr No. ranges: %s", ranges)
+    splits = split_by_disease(df, sr_no_ranges=ranges)
 
     # ------------------------------------------------------------------
     # 3. Print summary and verify
@@ -149,7 +161,7 @@ def main() -> None:
     # 4. Save each disease's subset to its own raw data directory
     # ------------------------------------------------------------------
     for disease, subset in splits.items():
-        out_path = OUTPUT_PATHS[disease]
+        out_path = output_paths[disease]
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save as Excel — preserves the full long-format structure for

@@ -30,15 +30,83 @@ Design principles
 from __future__ import annotations
 
 import logging
+import pathlib
 from typing import Any
 
 import pandas as pd
+import yaml
 
 logger = logging.getLogger(__name__)
 
-# Default Sr No. → disease mapping from the first real lab batch.
-# Keys = disease names (must match config/diseases/*.yaml `name` fields).
-# Values = (inclusive_min, inclusive_max) Sr No. ranges.
+# Default path to the Sr No. range config file (relative to repo root).
+_DEFAULT_RANGES_CONFIG = "config/sr_no_ranges.yaml"
+
+
+def load_sr_no_ranges(
+    config_path: str = _DEFAULT_RANGES_CONFIG,
+) -> dict[str, tuple[int, int]]:
+    """Load Sr No. → disease ranges from a YAML config file.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the YAML file (relative to repo root or absolute).
+        Expected format::
+
+            alpha_synuclein: [1, 100]
+            tau:             [101, 144]
+            ...
+
+    Returns
+    -------
+    dict[str, tuple[int, int]]
+        disease_name → (inclusive_min, inclusive_max)
+
+    Raises
+    ------
+    FileNotFoundError
+        If the config file does not exist.
+    ValueError
+        If any entry is not a two-element list of integers.
+    """
+    path = pathlib.Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Sr No. ranges config not found: {path.resolve()}. "
+            f"Expected file at {_DEFAULT_RANGES_CONFIG}."
+        )
+    with path.open(encoding="utf-8") as f:
+        raw: dict[str, Any] = yaml.safe_load(f)
+
+    if not raw or not isinstance(raw, dict):
+        raise ValueError(
+            f"Sr No. ranges config at {config_path!r} is empty or invalid. "
+            "Expected a mapping of disease_name: [min, max]."
+        )
+
+    result: dict[str, tuple[int, int]] = {}
+    for disease, bounds in raw.items():
+        if (
+            not isinstance(bounds, (list, tuple))
+            or len(bounds) != 2
+            or not all(isinstance(b, int) for b in bounds)
+        ):
+            raise ValueError(
+                f"Invalid range for disease {disease!r}: {bounds!r}. "
+                "Expected a two-element list of integers, e.g. [1, 100]."
+            )
+        result[disease] = (int(bounds[0]), int(bounds[1]))
+
+    logger.debug(
+        "load_sr_no_ranges: loaded %d diseases from %s", len(result), config_path
+    )
+    return result
+
+
+# Convenience module-level default — lazily loaded on first access.
+# Code that needs the default ranges should call load_sr_no_ranges() directly
+# rather than importing this constant, so that tests can point to a different
+# config file without monkeypatching.
 DEFAULT_SR_NO_RANGES: dict[str, tuple[int, int]] = {
     "alpha_synuclein": (1, 100),
     "tau":             (101, 144),

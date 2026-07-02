@@ -59,7 +59,7 @@ class TestRunExperimentOnceRandomForest:
         )
         expected_keys = {
             "experiment_id", "metrics", "train_rows", "test_rows",
-            "model_name", "disease",
+            "model_name", "disease", "target_type",
         }
         assert set(result.keys()) == expected_keys
 

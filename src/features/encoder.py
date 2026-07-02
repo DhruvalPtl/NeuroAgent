@@ -132,6 +132,21 @@ def encode_features(
         If required columns are missing from df.
     """
     _check_required_columns(df)
+    # If concentration is absent (e.g. max_label derived view), fill with 0.0
+    # as a sentinel so the encoder produces a valid fixed-length vector.
+    # This is documented behaviour: the concentration feature will be 0.0 for
+    # all rows, which is a meaningful "no dose info" signal in the embedding.
+    if "concentration" not in df.columns:
+        import warnings as _warnings
+        _warnings.warn(
+            "encode_features: 'concentration' column missing. "
+            "Filling with 0.0 (max_label view sentinel). "
+            "Ensure this is intentional (target_type='max_label').",
+            UserWarning,
+            stacklevel=2,
+        )
+        df = df.copy()
+        df["concentration"] = 0.0
     vectors = [
         _encode_row(
             sequence=row["peptide_sequence"],
@@ -151,7 +166,9 @@ _REQUIRED_COLS = ["peptide_sequence", "concentration", "is_acetylated"]
 
 
 def _check_required_columns(df: pd.DataFrame) -> None:
-    missing = [c for c in _REQUIRED_COLS if c not in df.columns]
+    # concentration is handled separately (may be filled with 0.0 for max_label)
+    _mandatory = [c for c in _REQUIRED_COLS if c != "concentration"]
+    missing = [c for c in _mandatory if c not in df.columns]
     if missing:
         raise ValueError(
             f"encode_features(): missing required columns: {missing}"

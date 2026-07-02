@@ -22,6 +22,21 @@ If ANY step 1-7 raises, the exception is caught, a status="failed" row is
 written to the DB (so failed runs appear in the leaderboard and are
 auditable), and the exception is re-raised so the caller sees it.  A failed
 run must never vanish silently.
+
+Feature encoding routing
+------------------------
+Since Step 9.5b, feature encoding is dispatched through model.encode_features()
+rather than calling src.features.encoder directly.  This enables future models
+(ESM-2, BiLSTM) to override encode_features() in their subclass and get their
+own feature representation without ANY changes to this file.
+
+target_type
+-----------
+Two views of the same raw data are supported:
+  "per_concentration"  — one row per (peptide × concentration), default.
+  "max_label"          — one row per peptide, label = max across concentrations.
+These are mutually exclusive and MUST NOT be compared on the same leaderboard
+row.  The target_type is persisted to the DB so the dashboard can filter.
 """
 
 from __future__ import annotations
@@ -35,8 +50,8 @@ import numpy as np
 # Step 3 — data loading
 from src.ingest import loader
 
-# Step 4 — feature encoding
-from src.features import encoder
+# Step 4 — max-label derived view (used when target_type="max_label")
+from src.features.max_label_view import build_max_label_dataset
 
 # Step 5 — homology-aware splitting
 from src.splitting import homology_split
@@ -52,6 +67,8 @@ from tracking import db
 
 logger = logging.getLogger(__name__)
 
+_VALID_TARGET_TYPES = frozenset({"per_concentration", "max_label"})
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -65,13 +82,15 @@ def run_experiment_once(
     allow_synthetic: bool = False,
     test_size: float = 0.2,
     random_state: int = 42,
+    target_type: str = "per_concentration",
 ) -> dict[str, Any]:
     """Run a complete ML experiment and persist results to the tracking DB.
 
     Steps executed (in order):
         1. Load & validate dataset        (src.ingest.loader)
+        1b. [if target_type="max_label"] collapse to one row per peptide
         2. Homology-aware train/test split (src.splitting.homology_split)
-        3. Feature encoding               (src.features.encoder)
+        3. Feature encoding               (model.encode_features)
         4. Instantiate model              (src.models.registry)
         5. Train model                    (model.fit)
         6. Predict on test set            (model.predict / predict_proba)
@@ -98,6 +117,14 @@ def run_experiment_once(
         Fraction of data (by row count, cluster-aligned) reserved for test.
     random_state : int
         Seed for homology splitting; fixes which clusters go to test.
+    target_type : str
+        One of ``"per_concentration"`` (default) or ``"max_label"``.
+        - ``"per_concentration"``: one training sample per (peptide ×
+          concentration).  Preserves dose-response information.
+        - ``"max_label"``: one training sample per peptide, label is the
+          worst-case (max) severity across all tested concentrations.
+          ⚠ Metrics from this view are NOT comparable to per_concentration
+          results — always check the target_type column in the leaderboard.
 
     Returns
     -------
@@ -108,9 +135,12 @@ def run_experiment_once(
         test_rows       int
         model_name      str
         disease         str
+        target_type     str
 
     Raises
     ------
+    ValueError
+        If ``target_type`` is not one of the valid values.
     KeyError
         If ``model_name`` is not in the model registry.
     ValueError
@@ -118,13 +148,19 @@ def run_experiment_once(
     Any other exception raised by the pipeline steps is re-raised
     after a failed-status row is written to the DB.
     """
+    if target_type not in _VALID_TARGET_TYPES:
+        raise ValueError(
+            f"target_type must be one of {sorted(_VALID_TARGET_TYPES)}, "
+            f"got {target_type!r}."
+        )
+
     disease_name: str = disease_config.get("name", "unknown")
     hyperparams = hyperparams or {}
 
     logger.info(
         "run_experiment_once: starting — disease=%s, model=%s, "
-        "test_size=%.2f, random_state=%d",
-        disease_name, model_name, test_size, random_state,
+        "target_type=%s, test_size=%.2f, random_state=%d",
+        disease_name, model_name, target_type, test_size, random_state,
     )
 
     # Ensure DB schema exists (idempotent)
@@ -144,6 +180,16 @@ def run_experiment_once(
         logger.info("Step 1 complete: %d rows loaded", len(df))
 
         # ------------------------------------------------------------------ #
+        # Step 1b — Apply target_type view (if max_label)
+        # ------------------------------------------------------------------ #
+        if target_type == "max_label":
+            df = build_max_label_dataset(df)
+            logger.info(
+                "Step 1b complete: max_label view — %d rows after collapse",
+                len(df),
+            )
+
+        # ------------------------------------------------------------------ #
         # Step 2 — Homology-aware split
         # ------------------------------------------------------------------ #
         train_df, test_df = homology_split.split_train_test(
@@ -157,51 +203,52 @@ def run_experiment_once(
         )
 
         # ------------------------------------------------------------------ #
-        # Step 3 — Feature encoding
+        # Step 3 — Instantiate model (needed before encoding so the model
+        #           can control its own feature extraction in Step 3b)
         # ------------------------------------------------------------------ #
-        X_train: np.ndarray = encoder.encode_features(train_df, disease_config)
-        X_test:  np.ndarray = encoder.encode_features(test_df,  disease_config)
+        model = registry.get_model(model_name, **hyperparams)
+        logger.info("Step 3 complete: model=%r", model)
+
+        # ------------------------------------------------------------------ #
+        # Step 3b — Feature encoding (dispatched through model.encode_features)
+        # ------------------------------------------------------------------ #
+        X_train: np.ndarray = model.encode_features(train_df, disease_config)
+        X_test:  np.ndarray = model.encode_features(test_df,  disease_config)
         y_train: np.ndarray = train_df["label_ordinal"].values.astype(int)
         y_test:  np.ndarray = test_df["label_ordinal"].values.astype(int)
         logger.info(
-            "Step 3 complete: X_train=%s, X_test=%s",
+            "Step 3b complete: X_train=%s, X_test=%s",
             X_train.shape, X_test.shape,
         )
 
         # ------------------------------------------------------------------ #
-        # Step 4 — Instantiate model
-        # ------------------------------------------------------------------ #
-        model = registry.get_model(model_name, **hyperparams)
-        logger.info("Step 4 complete: model=%r", model)
-
-        # ------------------------------------------------------------------ #
-        # Step 5 — Train
+        # Step 4 — Train
         # ------------------------------------------------------------------ #
         model.fit(X_train, y_train)
-        logger.info("Step 5 complete: model fitted")
+        logger.info("Step 4 complete: model fitted")
 
         # ------------------------------------------------------------------ #
-        # Step 6 — Predict
+        # Step 5 — Predict
         # ------------------------------------------------------------------ #
         y_pred:  np.ndarray = model.predict(X_test)
         y_proba: np.ndarray = model.predict_proba(X_test)
-        logger.info("Step 6 complete: predictions generated")
+        logger.info("Step 5 complete: predictions generated")
 
         # ------------------------------------------------------------------ #
-        # Step 7 — Evaluate
+        # Step 6 — Evaluate
         # ------------------------------------------------------------------ #
         metrics_dict: dict[str, Any] = eval_metrics.compute_metrics(
             y_test, y_pred, y_proba
         )
         logger.info(
-            "Step 7 complete: macro_f1=%.4f, QWK=%.4f, high_flag=%s",
+            "Step 6 complete: macro_f1=%.4f, QWK=%.4f, high_flag=%s",
             metrics_dict["macro_f1"],
             metrics_dict["quadratic_weighted_kappa"],
             metrics_dict["high_class_recall_flag"],
         )
 
         # ------------------------------------------------------------------ #
-        # Step 8 — Persist to DB
+        # Step 7 — Persist to DB
         # ------------------------------------------------------------------ #
         experiment_id = db.log_experiment(
             db_path=db_path,
@@ -213,9 +260,10 @@ def run_experiment_once(
             test_rows=len(test_df),
             metrics_json=metrics_dict,
             high_class_recall_flag=int(metrics_dict["high_class_recall_flag"]),
+            target_type=target_type,
             status="completed",
         )
-        logger.info("Step 8 complete: experiment_id=%d", experiment_id)
+        logger.info("Step 7 complete: experiment_id=%d", experiment_id)
 
     except Exception as exc:
         # Log the failure so it appears in the leaderboard / audit trail
@@ -234,6 +282,7 @@ def run_experiment_once(
                 test_rows=0,
                 metrics_json={},
                 high_class_recall_flag=0,
+                target_type=target_type,
                 status="failed",
                 error_message=f"{type(exc).__name__}: {exc}\n"
                               f"{traceback.format_exc()}",
@@ -251,6 +300,7 @@ def run_experiment_once(
         "test_rows":      len(test_df),
         "model_name":     model_name,
         "disease":        disease_name,
+        "target_type":    target_type,
     }
     logger.info("run_experiment_once: completed — result=%s", result)
     return result

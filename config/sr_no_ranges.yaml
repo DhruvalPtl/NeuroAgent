@@ -1,0 +1,21 @@
+# =============================================================================
+# config/sr_no_ranges.yaml
+# Sr No. range → disease mapping for real_lab_batch_001.xlsx
+# =============================================================================
+# Each entry maps a disease name (matching config/diseases/*.yaml `name` field)
+# to an inclusive [min_sr_no, max_sr_no] range.
+#
+# IMPORTANT: ranges must be contiguous and non-overlapping.
+# Any Sr No. outside all defined ranges will cause split_by_disease() to raise.
+#
+# To add a new protein:
+#   1. Add its range here.
+#   2. Add config/diseases/{name}.yaml
+#   3. Place the split data in data/raw/{name}/
+#   Zero changes to any Python source file.
+# =============================================================================
+
+alpha_synuclein: [1, 100]
+tau:             [101, 144]
+tdp43:           [145, 180]
+tmem:            [181, 214]

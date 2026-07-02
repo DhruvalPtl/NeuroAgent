@@ -217,10 +217,19 @@ class TestMissingColumnGuard:
         with pytest.raises(ValueError, match="missing required columns"):
             encode_features(df, alpha_config)
 
-    def test_missing_concentration_raises(self, alpha_config):
+    def test_missing_concentration_warns_and_fills(self, alpha_config):
+        """Missing concentration column emits a warning and fills with 0.0.
+
+        This is the supported behaviour for the max_label derived view which
+        drops the concentration column (meaningless after collapsing).  The
+        encoder fills with 0.0 as a sentinel so feature vectors remain valid
+        and consistently shaped (74-dim).
+        """
         df = pd.DataFrame({"peptide_sequence": ["ACDEF"], "is_acetylated": [False]})
-        with pytest.raises(ValueError, match="missing required columns"):
-            encode_features(df, alpha_config)
+        with pytest.warns(UserWarning, match="concentration"):
+            result = encode_features(df, alpha_config)
+        assert result.shape == (1, 74)
+        assert result.dtype == np.float32
 
 
 # ===========================================================================

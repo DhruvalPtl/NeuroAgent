@@ -91,6 +91,21 @@ def load_real_peptide_data(
     raw_df = _read_file(filepath)
 
     # ------------------------------------------------------------------ #
+    # 2b. Detect already-processed long-format files
+    #
+    # The migration script (scripts/fix_disease_split.py) saves split
+    # subsets back to disk in long format.  These files have `label_ordinal`
+    # already present — reshaping them again would fail because they have
+    # no wide concentration columns.
+    #
+    # Detection: presence of `label_ordinal` column in the raw read.
+    # When True, skip steps 3-5 (reshape, PTM compute, label mapping) and
+    # go straight to step 6 (column selection + type coercion).
+    # ------------------------------------------------------------------ #
+    if "label_ordinal" in raw_df.columns:
+        return _load_already_long_format(raw_df)
+
+    # ------------------------------------------------------------------ #
     # 3. Reshape wide → long
     # ------------------------------------------------------------------ #
     long_df = _reshape_wide_to_long(raw_df)
@@ -156,8 +171,11 @@ def _load_config(config_path: str) -> dict[str, Any]:
 def _read_file(filepath: str) -> pd.DataFrame:
     """Read .xlsx or .csv into a DataFrame based on file extension.
 
-    Real lab Excel files have 3 legend/notes rows before the actual
+    Raw lab Excel files have 3 legend/notes rows before the actual
     column header row, so we skip them with header=3.
+    If the Excel file is NOT in original wide format (e.g. it was saved
+    by the migration script in long format), header=3 produces unrecognised
+    columns.  In that case we fall back to header=0.
     CSV files are assumed to have headers on row 0.
     """
     path = pathlib.Path(filepath)
@@ -165,35 +183,100 @@ def _read_file(filepath: str) -> pd.DataFrame:
 
     if suffix == ".xlsx":
         df = pd.read_excel(filepath, header=3, dtype=str)
+        df.columns = _normalize_column_names(list(df.columns))
+        # Fallback: if we cannot find a recognisable peptide column, the file
+        # is NOT in original wide format — re-read with standard header=0.
+        if "peptide_sequence" not in df.columns:
+            df = pd.read_excel(filepath, header=0, dtype=str)
+            df.columns = _normalize_column_names(list(df.columns))
     elif suffix == ".csv":
         df = pd.read_csv(filepath, dtype=str)
+        df.columns = _normalize_column_names(list(df.columns))
     else:
         raise ValueError(
             f"Unsupported file extension '{suffix}'. "
             "Only .xlsx and .csv are accepted."
         )
+    return df
 
-    # Normalise column names:
-    #   - strip whitespace and newlines
-    #   - extract just the numeric concentration value from headers like
-    #     "0.1\nmg/ml", "0.25\nmg/ ml", "1 mg/ml" → "0.1", "0.25", "1"
-    #   - normalise "Sr No." → "sr_no", "Peptide sequence" → "peptide_sequence"
-    new_cols = []
-    for col in df.columns:
+
+def _normalize_column_names(columns: list[str]) -> list[str]:
+    """Normalise raw column name strings to canonical form.
+
+    Handles the following cases found in real lab files:
+      - Leading/trailing whitespace and embedded newlines
+      - Concentration columns like '0.1\nmg/ml' -> '0.1'
+      - 'Sr No.' / 'sr no' variants -> 'sr_no'
+      - 'Peptide sequence' / 'Sequence' variants -> 'peptide_sequence'
+
+    IMPORTANT: exact canonical column names are passed through unchanged
+    BEFORE any fuzzy matching.  This prevents 'sequence_id' from being
+    incorrectly renamed to 'peptide_sequence' when reading a file that is
+    already in long format (saved by migration script or previous run).
+    """
+    import re
+    # Columns that must pass through unchanged regardless of fuzzy rules.
+    _EXACT_PASSTHROUGH = frozenset({
+        "sequence_id", "sr_no", "peptide_sequence",
+        "concentration", "label_ordinal", "is_acetylated",
+        "source_file", "data_snapshot_hash",
+    })
+    new_cols: list[str] = []
+    for col in columns:
         cleaned = str(col).strip().replace("\n", " ").replace("  ", " ")
-        # Extract leading number from concentration columns (e.g. "0.1 mg/ml" → "0.1")
-        import re
-        conc_match = re.match(r"^(\d+\.?\d*)\s*mg", cleaned, re.IGNORECASE)
-        if conc_match:
-            new_cols.append(conc_match.group(1))
+        if cleaned in _EXACT_PASSTHROUGH:
+            new_cols.append(cleaned)
+        elif re.match(r"^(\d+\.?\d*)\s*mg", cleaned, re.IGNORECASE):
+            m = re.match(r"^(\d+\.?\d*)", cleaned)
+            new_cols.append(m.group(1))
         elif cleaned.lower().startswith("sr"):
             new_cols.append("sr_no")
         elif "peptide" in cleaned.lower() or "sequence" in cleaned.lower():
             new_cols.append("peptide_sequence")
         else:
             new_cols.append(cleaned)
-    df.columns = new_cols
-    return df
+    return new_cols
+
+
+def _load_already_long_format(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a pre-processed long-format DataFrame with correct types.
+
+    Called when the input file already contains ``label_ordinal`` — it
+    was saved in long format by the migration script or a previous pipeline
+    run.  No reshaping or label mapping is needed; we only coerce types and
+    select the expected output columns.
+    """
+    df = df.copy()
+
+    # Coerce numeric types
+    df["label_ordinal"]  = pd.to_numeric(df["label_ordinal"], errors="coerce").astype("Int64")
+    df["concentration"]  = pd.to_numeric(df.get("concentration", 0), errors="coerce")
+
+    # Drop rows where label_ordinal is NaN (shouldn't happen but guard)
+    df = df.dropna(subset=["label_ordinal"])
+    df["label_ordinal"] = df["label_ordinal"].astype(int)
+
+    # is_acetylated: use existing value if present, else derive from sequence
+    if "is_acetylated" in df.columns:
+        df["is_acetylated"] = df["is_acetylated"].astype(str).str.lower().map(
+            {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}
+        ).fillna(False).astype(bool)
+    else:
+        df["is_acetylated"] = (
+            df["peptide_sequence"].astype(str).str.contains("X", na=False, regex=False)
+        )
+
+    # Ensure sr_no column is present
+    if "sr_no" not in df.columns:
+        df["sr_no"] = df.get("sequence_id", df.index)
+    if "sequence_id" not in df.columns:
+        df["sequence_id"] = df["sr_no"]
+
+    # Select final columns (only those that are present)
+    desired = ["sequence_id", "sr_no", "peptide_sequence", "concentration",
+               "label_ordinal", "is_acetylated"]
+    present = [c for c in desired if c in df.columns]
+    return df[present].reset_index(drop=True)
 
 
 # Concentration columns expected in the raw file (mg/ml)

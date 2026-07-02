@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS experiments (
 # we catch the OperationalError that signals the column already exists.
 _DDL_MIGRATIONS: list[str] = [
     "ALTER TABLE experiments ADD COLUMN error_message TEXT;",
+    "ALTER TABLE experiments ADD COLUMN target_type TEXT NOT NULL DEFAULT 'per_concentration';",
 ]
 
 _REQUIRED_FIELDS = frozenset({

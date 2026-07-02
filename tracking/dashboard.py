@@ -171,7 +171,25 @@ diseases = ["All"] + sorted(raw_df["disease"].unique().tolist()) \
 disease_sel = st.sidebar.selectbox("Disease filter", diseases, index=0)
 filter_disease = None if disease_sel == "All" else disease_sel
 
+# Target type filter — CRITICAL: never compare per_concentration vs max_label
+target_type_options = ["All", "per_concentration", "max_label"]
+target_type_sel = st.sidebar.selectbox(
+    "Target type",
+    target_type_options,
+    index=0,
+    help=(
+        "⚠ per_concentration and max_label metrics are NOT comparable. "
+        "Always filter to one type before comparing models."
+    ),
+)
+st.sidebar.caption(
+    "⚠ **per_concentration** and **max_label** use different training sets. "
+    "Never compare their metrics on the same table."
+)
+
 df = _load(db_path, filter_disease, sort_by)
+if target_type_sel != "All" and not df.empty and "target_type" in df.columns:
+    df = df[df["target_type"] == target_type_sel].reset_index(drop=True)
 
 # ---------------------------------------------------------------------------
 # Summary metrics row
@@ -229,16 +247,26 @@ else:
         flag_html = (
             f'<span class="warn-badge">{_HIGH_RECALL_WARN}</span>'
             if is_flagged
-            else '<span class="ok-badge">✓ OK</span>'
+            else '<span class="ok-badge">\u2713 OK</span>'
+        )
+        tt = row.get("target_type", "per_concentration") or "per_concentration"
+        tt_color = "#89DCEB" if tt == "per_concentration" else "#F9E2AF"
+        tt_badge = (
+            f'<span style="display:inline-block;background:{tt_color}22;'
+            f'color:{tt_color};border:1px solid {tt_color}66;border-radius:5px;'
+            f'padding:1px 8px;font-size:0.75rem;font-weight:600">{tt}</span>'
         )
         header = (
-            f"#{rank}  **{row['model_type']}**  ·  `{row['disease']}`  "
-            f"·  F1 = **{mf1:.4f}**  ·  QWK = **{qwk:.4f}**  "
-            f"·  {row['timestamp'][:10]}"
+            f"#{rank}  **{row['model_type']}**  \u00b7  `{row['disease']}`  "
+            f"\u00b7  F1 = **{mf1:.4f}**  \u00b7  QWK = **{qwk:.4f}**  "
+            f"\u00b7  {row['timestamp'][:10]}"
         )
 
         with st.expander(header, expanded=(rank == 1)):
-            st.markdown(flag_html, unsafe_allow_html=True)
+            st.markdown(
+                flag_html + "&nbsp;&nbsp;" + tt_badge,
+                unsafe_allow_html=True,
+            )
 
             # Metric pills row
             pill_html = "".join([

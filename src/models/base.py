@@ -139,6 +139,47 @@ class BaseModel(abc.ABC):
     # Concrete helpers (available to all subclasses)
     # ------------------------------------------------------------------
 
+    def encode_features(
+        self,
+        df: "pd.DataFrame",
+        disease_config: dict,
+    ) -> "np.ndarray":
+        """Encode a DataFrame into a feature matrix for this model.
+
+        Default implementation delegates to
+        ``src.features.encoder.encode_features()`` — the 74-dimensional
+        tabular encoding (amino-acid composition + physicochemical properties
+        + PTM mask + concentration).  RandomForestModel and XGBoostModel
+        inherit this default with zero changes.
+
+        Override this method in subclasses that require a different feature
+        representation, e.g.:
+          - ESM-2 embeddings (fixed-length 1280-dim)
+          - BiLSTM raw token sequences
+          - Graph neural network node features
+
+        The pipeline calls this method on the model instance AFTER
+        registry.get_model() so each model type controls its own feature
+        extraction without any changes to pipeline.py.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Long-format DataFrame (or max-label collapsed view) from the
+            data loading pipeline.
+        disease_config : dict
+            Parsed disease YAML (passed through for PTM type access, etc.)
+
+        Returns
+        -------
+        np.ndarray
+            2-D float32 array of shape (n_samples, n_features).
+        """
+        # Lazy import to avoid circular import at module load time
+        from src.features import encoder as _encoder
+        import pandas as _pd  # noqa: F401 (type hint only)
+        return _encoder.encode_features(df, disease_config)
+
     def __repr__(self) -> str:
         params = ", ".join(f"{k}={v!r}" for k, v in self.get_params().items())
         return f"{self.__class__.__name__}({params})"
