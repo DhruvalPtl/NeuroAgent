@@ -10,6 +10,10 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/raw/alpha_synuclein/.gitkeep
+!data/raw/tau/.gitkeep
+!data/raw/tdp43/.gitkeep
+!data/raw/tmem/.gitkeep
 
 # Environment variables
 .env
