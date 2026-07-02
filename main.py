@@ -9,16 +9,17 @@ Usage examples
   python main.py run-once --disease alpha_synuclein --model random_forest
 
   # Run with custom hyperparameters (JSON string):
-  python main.py run-once --disease alpha_synuclein --model xgboost \
+  python main.py run-once --disease alpha_synuclein --model xgboost \\
       --hyperparams '{"n_estimators": 300, "learning_rate": 0.05}'
 
-  # Include synthetic fixture data (test/debug only):
-  python main.py run-once --disease alpha_synuclein --model random_forest \
-      --allow-synthetic
+  # Start the autonomous agent loop (requires ANTHROPIC_API_KEY):
+  python main.py run-agent --disease alpha_synuclein --max-cycles 3
 
-  # Custom DB path:
-  python main.py run-once --disease alpha_synuclein --model random_forest \
-      --db-path /tmp/test.db
+  # Resume agent loop from checkpoint (same command — checkpoint auto-detected):
+  python main.py run-agent --disease alpha_synuclein --max-cycles 3
+
+  # Custom budget cap (10 experiments/day default):
+  python main.py run-agent --disease tau --max-experiments-per-day 5 --max-cycles 2
 
 Execution model
 ---------------
@@ -156,9 +157,51 @@ def cmd_run_once(args: argparse.Namespace) -> None:
     _print_result(result)
 
 
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
+def cmd_run_agent(args: argparse.Namespace) -> None:
+    """Start (or resume) the autonomous agent loop."""
+    import os
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.error(
+            "ANTHROPIC_API_KEY is not set.\n"
+            "Set it before running the agent:\n"
+            "  $env:ANTHROPIC_API_KEY = 'sk-ant-...'"
+        )
+        sys.exit(1)
+
+    from agent.orchestrator import run_agent_loop
+
+    logger.info(
+        "Starting agent loop: disease=%s, max_cycles=%d, "
+        "max_experiments_per_day=%d",
+        args.disease, args.max_cycles, args.max_experiments_per_day,
+    )
+
+    summary = run_agent_loop(
+        disease=args.disease,
+        db_path=args.db_path,
+        max_experiments_per_day=args.max_experiments_per_day,
+        max_cycles=args.max_cycles,
+    )
+
+    lines = [
+        "",
+        "=" * 58,
+        "  NeuroAgent — Agent Loop Complete",
+        "=" * 58,
+        f"  Disease         : {args.disease}",
+        f"  Cycles run      : {summary['cycles_run']}",
+        f"  Stop reason     : {summary['stop_reason']}",
+    ]
+    ckpt = summary.get("final_checkpoint")
+    if ckpt and isinstance(ckpt.get("context"), dict):
+        ctx = ckpt["context"]
+        if ctx.get("macro_f1") is not None:
+            lines.append(f"  Last macro F1   : {ctx['macro_f1']:.4f}")
+        if ctx.get("promote_result") and not ctx["promote_result"].startswith("REJECTED"):
+            lines.append(f"  Last commit     : {ctx['promote_result'][:12]}")
+    lines += ["=" * 58, ""]
+    print("\n".join(lines))
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -174,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- run-once ----
     p_run = subparsers.add_parser(
         "run-once",
-        help="Run a single complete ML experiment (load → split → train → eval → log)",
+        help="Run a single complete ML experiment (load -> split -> train -> eval -> log)",
     )
     p_run.add_argument(
         "--disease",
@@ -190,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="MODEL",
         help=(
-            "Model registry key. Available: random_forest, xgboost. "
+            "Model registry key. Available: random_forest, xgboost, esm2_coral. "
             "Step 6 models only — extend via @register_model."
         ),
     )
@@ -233,6 +276,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Random seed for cluster-based splitting (default: 42)",
     )
     p_run.set_defaults(func=cmd_run_once)
+
+    # ---- run-agent ----
+    p_agent = subparsers.add_parser(
+        "run-agent",
+        help=(
+            "Start (or resume) the autonomous agent loop. "
+            "Requires ANTHROPIC_API_KEY in environment."
+        ),
+    )
+    p_agent.add_argument(
+        "--disease",
+        required=True,
+        metavar="DISEASE",
+        help=(
+            "Disease protein to target. Must have config/diseases/{disease}.yaml. "
+            "Example: alpha_synuclein"
+        ),
+    )
+    p_agent.add_argument(
+        "--max-cycles",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Maximum debate->run cycles in this invocation (default: 5). "
+            "The loop will also stop earlier if the daily budget is exhausted."
+        ),
+    )
+    p_agent.add_argument(
+        "--max-experiments-per-day",
+        type=int,
+        default=10,
+        metavar="N",
+        help=(
+            "Daily hard cap on experiments (default: 10). "
+            "Persisted in platform_core/.budget_state.json — survives restarts."
+        ),
+    )
+    p_agent.add_argument(
+        "--db-path",
+        default="tracking/neuroagent.db",
+        metavar="PATH",
+        help="Path to the SQLite tracking database (default: tracking/neuroagent.db)",
+    )
+    p_agent.set_defaults(func=cmd_run_agent)
 
     return parser
 
