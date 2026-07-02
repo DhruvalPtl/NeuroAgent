@@ -19,3 +19,7 @@ data/processed/*
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# NeuroAgent runtime state — ephemeral, per-process, never commit
+platform_core/.budget_state.json
+platform_core/.checkpoint_state.json
