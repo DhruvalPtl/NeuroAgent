@@ -155,7 +155,28 @@ def run_experiment_once(
         )
 
     disease_name: str = disease_config.get("name", "unknown")
-    hyperparams = hyperparams or {}
+    hyperparams = dict(hyperparams or {})
+
+    # ------------------------------------------------------------------ #
+    # Pipeline-level keys that may arrive via --hyperparams JSON but must
+    # NOT be forwarded to the model constructor.  Extract them here so the
+    # user can write --hyperparams '{"target_type": "max_label"}' without
+    # causing a TypeError in get_model().
+    # ------------------------------------------------------------------ #
+    _PIPELINE_KEYS = {"target_type", "test_size", "random_state",
+                      "allow_synthetic", "db_path"}
+    # Allow target_type from hyperparams to override the function argument
+    if "target_type" in hyperparams:
+        _ht = hyperparams.pop("target_type")
+        if _ht not in _VALID_TARGET_TYPES:
+            raise ValueError(
+                f"target_type in hyperparams must be one of "
+                f"{sorted(_VALID_TARGET_TYPES)}, got {_ht!r}."
+            )
+        target_type = _ht
+    # Silently strip other pipeline-level keys to avoid constructor errors
+    for _k in list(_PIPELINE_KEYS - {"target_type"}):
+        hyperparams.pop(_k, None)
 
     logger.info(
         "run_experiment_once: starting — disease=%s, model=%s, "
