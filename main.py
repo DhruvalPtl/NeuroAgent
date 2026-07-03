@@ -169,11 +169,13 @@ def cmd_run_agent(args: argparse.Namespace) -> None:
     import os
 
     _PROVIDER_ENV_KEYS = {
-        "gemini":    "GEMINI_API_KEY",
-        "gemini3.5": "GEMINI_API_KEY",
-        "gemini3.1": "GEMINI_API_KEY",
-        "groq":      "GROQ_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
+        "gemini":                 "GEMINI_API_KEY",
+        "gemini-2.5-flash":       "GEMINI_API_KEY",
+        "gemini-2.5-flash-lite":  "GEMINI_API_KEY",
+        "gemini-3.1-flash-lite":  "GEMINI_API_KEY",
+        "gemini-3.5-flash":       "GEMINI_API_KEY",
+        "groq":                   "GROQ_API_KEY",
+        "anthropic":              "ANTHROPIC_API_KEY",
     }
     required_key = _PROVIDER_ENV_KEYS[args.provider]
     if not os.environ.get(required_key):
@@ -334,12 +336,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_agent.add_argument(
         "--provider",
-        choices=["gemini", "gemini3.5", "gemini3.1", "groq", "anthropic"],
+        choices=[
+            "gemini", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+            "gemini-3.1-flash-lite", "gemini-3.5-flash", "groq", "anthropic"
+        ],
         default="gemini",
         metavar="PROVIDER",
         help=(
             "LLM provider for debate loop (default: gemini). "
-            "gemini/gemini3.5/gemini3.1: free, needs GEMINI_API_KEY. "
+            "gemini/gemini-2.5-flash/gemini-2.5-flash-lite/gemini-3.1-flash-lite/gemini-3.5-flash: free, needs GEMINI_API_KEY. "
             "groq: free+fast, needs GROQ_API_KEY. "
             "anthropic: paid, needs ANTHROPIC_API_KEY."
         ),
