@@ -13,4 +13,5 @@ transformers
 anthropic
 google-generativeai
 groq
+python-dotenv
 

@@ -45,6 +45,13 @@ _ROOT = Path(__file__).parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Load environment variables from .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Configure basic logging BEFORE other imports so all module loggers pick it up
 logging.basicConfig(
     level=logging.INFO,

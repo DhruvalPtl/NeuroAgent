@@ -63,6 +63,12 @@ import logging
 import os
 import time
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -70,7 +76,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PROVIDER_DEFAULTS: dict[str, str] = {
-    "gemini":    "gemini-2.0-flash",
+    "gemini":    "gemini-2.",
     "groq":      "llama-3.3-70b-versatile",
     "anthropic": "claude-sonnet-4-5",
 }
