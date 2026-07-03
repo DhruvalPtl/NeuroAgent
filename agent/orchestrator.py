@@ -155,35 +155,84 @@ def node_load_leaderboard(state: AgentState) -> dict:
 
 
 def node_run_debate(state: AgentState) -> dict:
-    """Node 3: Run the 4-expert debate → consensus hyperparameter proposal."""
+    """Node 3: Run the 4-expert debate -> consensus hyperparameter proposal.
+
+    Catches all exceptions from the LLM call chain so a transient API error
+    (rate limit, timeout, network blip) doesn't crash the entire loop.
+    On failure the consensus is set to None; node_stage_experiment detects
+    this and short-circuits to SKIPPED so the cycle completes cleanly.
+    """
     logger.info("node_run_debate: starting debate for disease=%r.", state["disease"])
-    result = run_debate(
-        disease=state["disease"],
-        leaderboard_context=state["leaderboard"],
-    )
-    logger.info(
-        "node_run_debate: debate complete — model=%s, hyperparams=%s.",
-        result["consensus"].get("target_model"),
-        result["consensus"].get("proposed_hyperparams"),
-    )
-    return {"debate_result": result}
+    try:
+        result = run_debate(
+            disease=state["disease"],
+            leaderboard_context=state["leaderboard"],
+        )
+        logger.info(
+            "node_run_debate: debate complete -- model=%s, hyperparams=%s.",
+            result["consensus"].get("target_model"),
+            result["consensus"].get("proposed_hyperparams"),
+        )
+        return {"debate_result": result}
+    except Exception as exc:
+        logger.error(
+            "node_run_debate: debate failed (%s: %s) -- skipping this cycle.",
+            type(exc).__name__, exc,
+        )
+        return {"debate_result": {"consensus": None, "error": str(exc)}}
 
 
 def node_stage_experiment(state: AgentState) -> dict:
-    """Node 4: Write the consensus as a staged JSON experiment file."""
-    consensus = state["debate_result"]["consensus"]
+    """Node 4: Write the consensus as a staged JSON experiment file.
+
+    If the debate failed (consensus is None), skip staging entirely and
+    return a SKIPPED promote_result so the graph flows through to
+    checkpoint without touching the filesystem or auditor.
+    """
+    debate = state["debate_result"] or {}
+    consensus = debate.get("consensus")
+
+    if consensus is None:
+        error_msg = debate.get("error", "unknown debate error")
+        logger.warning(
+            "node_stage_experiment: debate produced no consensus (%s) -- skipping.",
+            error_msg,
+        )
+        return {
+            "staged_path":   None,
+            "promote_result": f"SKIPPED: debate failed ({error_msg})",
+        }
+
     staged_path = write_hyperparameter_experiment(
         consensus=consensus,
-        hypothesis_id=state["debate_result"].get("timestamp"),
+        hypothesis_id=debate.get("timestamp"),
     )
-    logger.info("node_stage_experiment: staged → %s", staged_path)
+    logger.info("node_stage_experiment: staged -> %s", staged_path)
     return {"staged_path": staged_path}
 
 
 def node_audit_promote(
     state: AgentState, versioning: Versioning, checkpoint: Checkpoint
 ) -> dict:
-    """Node 5: Audit + promote.  Rejected proposals are logged but don't halt."""
+    """Node 5: Audit + promote.  Rejected proposals are logged but don't halt.
+
+    If staged_path is None (debate failed and staging was skipped), we bypass
+    promote_experiment entirely — calling it with None would raise a TypeError.
+    The promote_result already set by node_stage_experiment is preserved as-is.
+    """
+    if state.get("staged_path") is None:
+        # Debate failed upstream; promote_result already set to "SKIPPED: ..."
+        logger.info(
+            "node_audit_promote: staged_path is None -- bypassing audit (promote_result=%r).",
+            state.get("promote_result"),
+        )
+        checkpoint.save("audit_promote", {
+            "cycle":          state["cycle"],
+            "promote_result": state.get("promote_result"),
+            "staged_path":    None,
+        })
+        return {}  # preserve existing promote_result unchanged
+
     result = promote_experiment(
         staged_file_path=state["staged_path"],
         versioning=versioning,
@@ -201,12 +250,15 @@ def node_run_experiment(
     state: AgentState, budget: Budget, checkpoint: Checkpoint
 ) -> dict:
     """Node 6: Run the promoted experiment through the full ML pipeline."""
-    if state["promote_result"].startswith("REJECTED"):
+    promote = state.get("promote_result") or ""
+    if promote.startswith("REJECTED") or promote.startswith("SKIPPED"):
         logger.info(
-            "node_run_experiment: skipping — proposal was rejected (%s).",
-            state["promote_result"],
+            "node_run_experiment: skipping -- proposal was not approved (%s).",
+            promote,
         )
-        return {"experiment_result": {"status": "skipped_rejected_proposal"}}
+        status = "skipped_rejected_proposal" if promote.startswith("REJECTED") \
+            else "skipped_debate_failed"
+        return {"experiment_result": {"status": status}}
 
     consensus = state["debate_result"]["consensus"]
     hp        = consensus.get("proposed_hyperparams", {})

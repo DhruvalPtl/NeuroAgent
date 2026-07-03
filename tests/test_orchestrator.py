@@ -427,3 +427,84 @@ class TestBudgetExhaustionIntegration:
         mock_debate.assert_not_called()
         mock_pipeline.assert_not_called()
         assert final_state.get("stop_reason") == "BUDGET_EXHAUSTED"
+
+
+# ===========================================================================
+# 11. Debate failure handling — loop must survive LLM API errors
+# ===========================================================================
+
+class TestDebateFailureHandling:
+    """Verify the loop is resilient to LLM API failures in the debate node.
+
+    These tests cover the try/except added in Step 10.4-patch.  Without it,
+    a single rate-limit or network error would terminate the entire agent run.
+    """
+
+    def test_node_run_debate_catches_exception_returns_error_dict(self):
+        """node_run_debate must return an error dict, not raise, on failure."""
+        state = _make_state(leaderboard={"note": "empty"})
+        with patch(
+            "agent.orchestrator.run_debate",
+            side_effect=RuntimeError("Anthropic API rate limit exceeded"),
+        ):
+            result = node_run_debate(state)
+
+        # Must not raise — instead returns error dict
+        assert "debate_result" in result
+        assert result["debate_result"]["consensus"] is None
+        assert "rate limit" in result["debate_result"]["error"].lower()
+
+    def test_node_run_debate_error_dict_has_error_key(self):
+        """Error dict must contain the exception message for traceability."""
+        state = _make_state(leaderboard={})
+        with patch(
+            "agent.orchestrator.run_debate",
+            side_effect=ValueError("JSON parse failed in arbiter"),
+        ):
+            result = node_run_debate(state)
+
+        assert result["debate_result"]["error"] == "JSON parse failed in arbiter"
+
+    def test_node_stage_experiment_skips_on_none_consensus(self):
+        """node_stage_experiment must return SKIPPED when consensus is None."""
+        state = _make_state(
+            debate_result={"consensus": None, "error": "API timeout"},
+        )
+        with patch("agent.orchestrator.write_hyperparameter_experiment") as mock_write:
+            result = node_stage_experiment(state)
+
+        # Must not call the writer at all
+        mock_write.assert_not_called()
+        assert result["staged_path"] is None
+        assert result["promote_result"].startswith("SKIPPED")
+        assert "API timeout" in result["promote_result"]
+
+    def test_full_graph_completes_cycle_when_debate_raises(self):
+        """The compiled graph must reach checkpoint even if run_debate raises."""
+        budget     = _mock_budget(can_run=True)
+        versioning = _mock_versioning()
+        checkpoint = _mock_checkpoint()
+
+        compiled   = build_graph(budget=budget, versioning=versioning, checkpoint=checkpoint)
+
+        # Limit to 1 cycle so the test terminates quickly
+        initial_state = _make_state(max_cycles=1)
+
+        with patch(
+            "agent.orchestrator.run_debate",
+            side_effect=ConnectionError("Network unreachable"),
+        ) as mock_debate, \
+             patch("agent.orchestrator.run_experiment_once") as mock_pipeline:
+            final_state = compiled.invoke(initial_state)
+
+        # Debate was called (and failed), but pipeline was never called
+        mock_debate.assert_called_once()
+        mock_pipeline.assert_not_called()
+
+        # cycle incremented to 1 — means checkpoint node was reached
+        assert final_state["cycle"] == 1, \
+            "checkpoint_node must increment cycle even after debate failure"
+
+        # promote_result reflects the skip, not a crash
+        assert final_state.get("promote_result", "").startswith("SKIPPED"), \
+            f"Expected SKIPPED promote_result, got: {final_state.get('promote_result')!r}"
