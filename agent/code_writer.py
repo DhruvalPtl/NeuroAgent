@@ -1,40 +1,46 @@
 """
 agent/code_writer.py
 =====================
-Staged hyperparameter experiment writer for NeuroAgent's autonomous loop.
+Staged experiment writer for NeuroAgent's autonomous loop.
 
-Milestone 1 design: "writing code" = writing a JSON config file
----------------------------------------------------------------
-For Milestone 1, the agent's action space is deliberately restricted to
-tweaking hyperparameters of EXISTING registered models.  There is no
-Python file generation, no model architecture changes, no arbitrary code
-execution.  The "code" produced here is a small, strictly-schematised JSON
-file that pipeline.py consumes directly via get_model(model_name, **hyperparams).
+Milestone 1 — JSON hyperparameter configs (write_hyperparameter_experiment)
+----------------------------------------------------------------------------
+The agent's action space is restricted to tweaking hyperparameters of EXISTING
+registered models.  "Code" is a small, strictly-schematised JSON file consumed
+by pipeline.py via get_model(model_name, **hyperparams).  code_auditor.py only
+validates a JSON file against schema + registry — no sandboxing needed.
 
-This design means:
-  • code_auditor.py only ever validates a JSON file against a schema +
-    registry — no RestrictedPython, no AST analysis, no sandboxing needed.
-  • The audit gate is 100% deterministic and fast (< 10 ms per staged file).
-  • The full surface area of damage from a hallucinating LLM is bounded to
-    the model's own constructor validation + the auditor's bounds checks.
+Milestone 2 — Real Python architecture files (write_model_architecture)
+-----------------------------------------------------------------------
+When consensus["proposal_type"] == "new_architecture", the LLM proposes an
+entirely new model class.  write_model_architecture():
+  1. Validates the consensus dict and checks for registry name collisions
+     (fail fast, before touching disk)
+  2. Inspects the LLM's architecture_code via AST to verify all five required
+     BaseModel abstract methods are defined and no forbidden imports are present
+     (cheap in-process checks, no subprocess overhead)
+  3. Wraps the code in a canonical template (correct imports, @register_model
+     decorator, BaseModel inheritance)
+  4. Writes the assembled .py file to staging_dir (atomic write)
+  5. Writes a companion .json metadata file for the audit trail
 
-Milestone 2 will extend code_writer to generate actual .py files (new model
-architectures).  At that point, code_auditor MUST be upgraded to use
-RestrictedPython or a subprocess sandbox before any generated code is executed.
-Do NOT skip that step.
+The staged .py file is NOT yet safe to execute — it must pass through
+agent/sandbox.py's run_in_sandbox() before pipeline.py imports it.  This
+module is responsible only for generation and pre-staging structural checks.
 
-Staged file schema (written by this module, validated by code_auditor):
+Staged file schema for hyperparameter experiments (validated by code_auditor):
   {
-    "model_name":               str,       # registered model key
-    "hyperparams":              dict,      # param_name -> value
-    "disease":                  str,       # disease config name
-    "target_type":              str,       # "per_concentration" | "max_label"
-    "proposed_by_hypothesis_id": str | int # debate trail reference
+    "model_name":               str,
+    "hyperparams":              dict,
+    "disease":                  str,
+    "target_type":              str,
+    "proposed_by_hypothesis_id": str | int
   }
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -46,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 _STAGING_DIR_DEFAULT = "platform_core/.staging"
 
-# Exact set of top-level keys written to every staged file.
+# Exact set of top-level keys written to every staged hyperparameter file.
 # code_auditor.py validates against this same set — keep in sync.
 _STAGED_SCHEMA_KEYS: frozenset[str] = frozenset({
     "model_name",
@@ -56,6 +62,187 @@ _STAGED_SCHEMA_KEYS: frozenset[str] = frozenset({
     "proposed_by_hypothesis_id",
 })
 
+# Required abstract methods from BaseModel that every architecture must implement.
+_REQUIRED_METHODS: frozenset[str] = frozenset({
+    "fit",
+    "predict",
+    "predict_proba",
+    "get_params",
+    "set_params",
+})
+
+# Mirrors sandbox.DEFAULT_ALLOWED_IMPORTS — kept in sync manually.
+# Importing from outside this set is rejected at the pre-staging AST check.
+# This is an early fast-fail: the sandbox would catch it later anyway, but
+# catching it here produces a clearer error and saves subprocess overhead.
+_ARCHITECTURE_ALLOWED_IMPORTS: frozenset[str] = frozenset({
+    "torch",
+    "numpy",
+    "sklearn",
+    "pandas",
+    "math",
+    "collections",
+    "itertools",
+    "functools",
+    "typing",
+    "abc",
+    "dataclasses",
+    "enum",
+    "copy",
+    "re",
+    # Platform imports always required by the generated template
+    "src",
+    "logging",
+})
+
+# ---------------------------------------------------------------------------
+# Template for wrapping the LLM's architecture_code
+# ---------------------------------------------------------------------------
+
+# Uses str.format() placeholders.  All literal curly braces in the output
+# Python file are encoded as {{ / }} (f-string escape rules apply to .format).
+_ARCHITECTURE_TEMPLATE = '''\
+"""
+{module_docstring}
+"""
+# Auto-generated by agent/code_writer.py — DO NOT EDIT by hand.
+# Staged at: {timestamp}
+# Proposal context: {proposal_context}
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import numpy as np
+
+from src.models.base import BaseModel
+from src.models.registry import register_model
+
+logger = logging.getLogger(__name__)
+
+
+@register_model({model_name_repr})
+class {class_name}(BaseModel):
+    """LLM-proposed model architecture: {new_model_name}."""
+
+    name = {model_name_repr}
+
+{indented_architecture_code}
+'''
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _validate_architecture_imports(architecture_code: str) -> None:
+    """
+    Parse architecture_code and reject any import outside the sandbox allowlist.
+
+    This is a pre-staging fast-fail — cheaper than running the full sandbox
+    but provides an early, clear error message.  The sandbox's AST check
+    provides a second, independent enforcement layer downstream.
+
+    Raises
+    ------
+    ValueError
+        If a forbidden or out-of-allowlist import is found.
+    SyntaxError
+        If the architecture_code cannot be parsed.
+    """
+    try:
+        tree = ast.parse(architecture_code, filename="<architecture_code>")
+    except SyntaxError as exc:
+        raise SyntaxError(
+            f"architecture_code has a syntax error: {exc}"
+        ) from exc
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top not in _ARCHITECTURE_ALLOWED_IMPORTS:
+                    raise ValueError(
+                        f"architecture_code imports '{alias.name}' which is outside "
+                        f"the sandbox allowlist.  Allowed top-level packages: "
+                        f"{sorted(_ARCHITECTURE_ALLOWED_IMPORTS)}"
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0]
+            if top not in _ARCHITECTURE_ALLOWED_IMPORTS:
+                raise ValueError(
+                    f"architecture_code imports from '{module}' which is outside "
+                    f"the sandbox allowlist.  Allowed top-level packages: "
+                    f"{sorted(_ARCHITECTURE_ALLOWED_IMPORTS)}"
+                )
+
+
+def _validate_required_methods(architecture_code: str) -> None:
+    """
+    Parse architecture_code and verify all five required BaseModel methods are
+    defined.  Fails fast with a clear message listing every missing method.
+
+    This check operates on the raw LLM body code (before template wrapping),
+    wrapping it in a minimal class shell so ast.parse sees method definitions
+    at the correct indentation level.
+
+    Raises
+    ------
+    ValueError
+        If any required method is absent.
+    SyntaxError
+        If the architecture_code cannot be parsed.
+    """
+    wrapped = "class _Probe:\n"
+    for line in (architecture_code or "").splitlines():
+        wrapped += f"    {line}\n"
+    if not (architecture_code or "").strip():
+        wrapped += "    pass\n"
+
+    try:
+        tree = ast.parse(wrapped, filename="<architecture_code>")
+    except SyntaxError as exc:
+        raise SyntaxError(
+            f"architecture_code has a syntax error: {exc}"
+        ) from exc
+
+    defined_methods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_Probe":
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    defined_methods.add(item.name)
+
+    missing = _REQUIRED_METHODS - defined_methods
+    if missing:
+        raise ValueError(
+            f"architecture_code is missing required BaseModel method(s): "
+            f"{sorted(missing)}.  Every architecture must implement all of: "
+            f"{sorted(_REQUIRED_METHODS)}.  Found: {sorted(defined_methods)}."
+        )
+
+
+def _derive_class_name(new_model_name: str) -> str:
+    """Convert 'nearest_mean' → 'NearestMeanModel' (PascalCase + Model suffix)."""
+    parts = new_model_name.replace("-", "_").split("_")
+    pascal = "".join(p.capitalize() for p in parts if p)
+    return f"{pascal}Model"
+
+
+def _indent_code(code: str, spaces: int = 4) -> str:
+    """Indent every non-empty line of *code* by *spaces* spaces."""
+    prefix = " " * spaces
+    return "\n".join(
+        prefix + line if line.strip() else ""
+        for line in code.splitlines()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def write_hyperparameter_experiment(
     consensus: dict[str, Any],
@@ -89,7 +276,6 @@ def write_hyperparameter_experiment(
     OSError
         If the staging directory cannot be created or the file cannot be written.
     """
-    # Validate required consensus keys before touching disk
     required = {"target_model", "proposed_hyperparams", "target_disease", "target_type"}
     missing = required - set(consensus.keys())
     if missing:
@@ -98,7 +284,6 @@ def write_hyperparameter_experiment(
             f"{sorted(missing)}"
         )
 
-    # Build the staged payload — ONLY the approved schema keys
     payload: dict[str, Any] = {
         "model_name":               consensus["target_model"],
         "hyperparams":              dict(consensus["proposed_hyperparams"]),
@@ -110,16 +295,13 @@ def write_hyperparameter_experiment(
         ),
     }
 
-    # Create staging directory (idempotent)
     os.makedirs(staging_dir, exist_ok=True)
 
-    # Unique filename: timestamp + 6-char UUID suffix to prevent collisions
     ts     = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     uid    = uuid.uuid4().hex[:6]
     fname  = f"staged_{ts}_{payload['model_name']}_{uid}.json"
     fpath  = os.path.join(staging_dir, fname)
 
-    # Atomic write (temp + rename) so a crash mid-write leaves no corrupt file
     tmp_path = fpath + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -127,7 +309,6 @@ def write_hyperparameter_experiment(
         os.replace(tmp_path, fpath)
     except OSError as exc:
         logger.error("write_hyperparameter_experiment: failed to write %s: %s", fpath, exc)
-        # Best-effort cleanup of temp file
         try:
             os.remove(tmp_path)
         except OSError:
@@ -144,3 +325,205 @@ def write_hyperparameter_experiment(
         len(payload["hyperparams"]),
     )
     return fpath
+
+
+def write_model_architecture(
+    consensus: dict[str, Any],
+    staging_dir: str = _STAGING_DIR_DEFAULT,
+) -> str:
+    """
+    Stage a new model architecture .py file proposed by the LLM debate.
+
+    Only invoked when ``consensus["proposal_type"] == "new_architecture"``.
+    The Milestone 1 hyperparameter-tweak path continues to use
+    write_hyperparameter_experiment.
+
+    Validation pipeline (all run BEFORE any file is written to disk):
+      1. Consensus key presence check — fail fast with a clear KeyError
+      2. proposal_type and base_class enforcement
+      3. Registry collision check — reject if new_model_name already exists
+      4. Import allowlist check — reject architecture_code that imports outside
+         the sandbox-approved package set (same check the sandbox runs, but
+         cheaper and earlier in the pipeline)
+      5. Required-method AST check — reject if fit/predict/predict_proba/
+         get_params/set_params are not all defined in architecture_code
+
+    Two files are written atomically to staging_dir:
+      - staged_{timestamp}_{new_model_name}_{uid}.py   — assembled Python source
+      - staged_{timestamp}_{new_model_name}_{uid}.json — audit metadata
+
+    Parameters
+    ----------
+    consensus : dict
+        Required keys:
+          - proposal_type (str): must equal "new_architecture"
+          - new_model_name (str): unique registry key for the new model
+          - architecture_code (str): Python method definitions (class body only;
+            the template adds the class header, decorator, and imports)
+          - base_class (str): must equal "BaseModel"
+    staging_dir : str
+        Directory to write staged files.  Created if it does not exist.
+
+    Returns
+    -------
+    str
+        Absolute path to the staged .py file.
+
+    Raises
+    ------
+    KeyError
+        If required consensus keys are missing.
+    ValueError
+        If new_model_name collides with an existing registry entry,
+        base_class is not "BaseModel", or architecture_code imports a
+        forbidden package or is missing required methods.
+    SyntaxError
+        If architecture_code cannot be parsed by Python's ast module.
+    OSError
+        If staging directory creation or file write fails.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Validate consensus keys
+    # ------------------------------------------------------------------
+    required_keys = {
+        "proposal_type", "new_model_name", "architecture_code", "base_class",
+    }
+    missing_keys = required_keys - set(consensus.keys())
+    if missing_keys:
+        raise KeyError(
+            f"write_model_architecture: consensus is missing required keys: "
+            f"{sorted(missing_keys)}"
+        )
+
+    proposal_type = consensus["proposal_type"]
+    if proposal_type != "new_architecture":
+        raise ValueError(
+            f"write_model_architecture: expected proposal_type='new_architecture', "
+            f"got {proposal_type!r}.  Use write_hyperparameter_experiment() for "
+            "hyperparameter_tweak proposals."
+        )
+
+    base_class = consensus["base_class"]
+    if base_class != "BaseModel":
+        raise ValueError(
+            f"write_model_architecture: base_class must be 'BaseModel', "
+            f"got {base_class!r}.  All NeuroAgent models must inherit from BaseModel."
+        )
+
+    new_model_name: str = consensus["new_model_name"]
+    architecture_code: str = consensus["architecture_code"]
+
+    if not new_model_name or not isinstance(new_model_name, str):
+        raise ValueError(
+            "write_model_architecture: new_model_name must be a non-empty string."
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Registry collision check (before touching disk)
+    # ------------------------------------------------------------------
+    from src.models.registry import MODEL_REGISTRY, _ensure_models_registered
+    _ensure_models_registered()
+
+    if new_model_name in MODEL_REGISTRY:
+        raise ValueError(
+            f"write_model_architecture: new_model_name={new_model_name!r} already "
+            f"exists in MODEL_REGISTRY (registered by "
+            f"{MODEL_REGISTRY[new_model_name].__qualname__}).  "
+            "Choose a unique name for the new architecture."
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3: Import allowlist check on LLM's architecture_code
+    # ------------------------------------------------------------------
+    _validate_architecture_imports(architecture_code)
+
+    # ------------------------------------------------------------------
+    # Step 4: Required-method AST check
+    # ------------------------------------------------------------------
+    _validate_required_methods(architecture_code)
+
+    # ------------------------------------------------------------------
+    # Step 5: Assemble the full Python source from template
+    # ------------------------------------------------------------------
+    ts         = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    class_name = _derive_class_name(new_model_name)
+
+    proposal_context = json.dumps({
+        k: v for k, v in consensus.items()
+        if k != "architecture_code"
+        and isinstance(v, (str, int, float, bool, type(None)))
+    }, ensure_ascii=False)
+
+    module_docstring = (
+        f"src/models/staged_{new_model_name}.py\n"
+        f"{'=' * (len('src/models/staged_') + len(new_model_name) + 3)}\n"
+        f"LLM-proposed model: {new_model_name}\n"
+        f"Staged at: {ts}\n"
+        "Status: STAGED — pending sandbox validation and promotion."
+    )
+
+    assembled_source = _ARCHITECTURE_TEMPLATE.format(
+        module_docstring=module_docstring,
+        timestamp=ts,
+        proposal_context=proposal_context,
+        model_name_repr=repr(new_model_name),
+        class_name=class_name,
+        new_model_name=new_model_name,
+        indented_architecture_code=_indent_code(architecture_code, spaces=4),
+    )
+
+    # ------------------------------------------------------------------
+    # Step 6: Write to staging_dir (atomic)
+    # ------------------------------------------------------------------
+    os.makedirs(staging_dir, exist_ok=True)
+
+    uid       = uuid.uuid4().hex[:6]
+    base      = f"staged_{ts}_{new_model_name}_{uid}"
+    py_path   = os.path.join(staging_dir, f"{base}.py")
+    meta_path = os.path.join(staging_dir, f"{base}.json")
+
+    # Write Python source atomically
+    py_tmp = py_path + ".tmp"
+    try:
+        with open(py_tmp, "w", encoding="utf-8") as fh:
+            fh.write(assembled_source)
+        os.replace(py_tmp, py_path)
+    except OSError as exc:
+        logger.error("write_model_architecture: failed to write %s: %s", py_path, exc)
+        try:
+            os.remove(py_tmp)
+        except OSError:
+            pass
+        raise
+
+    # Write audit metadata atomically
+    metadata: dict[str, Any] = {
+        "staged_py_file":  os.path.basename(py_path),
+        "new_model_name":  new_model_name,
+        "class_name":      class_name,
+        "base_class":      base_class,
+        "proposal_type":   proposal_type,
+        "timestamp":       ts,
+        "target_disease":  consensus.get("target_disease"),
+        "status":          "staged_pending_validation",
+    }
+    meta_tmp = meta_path + ".tmp"
+    try:
+        with open(meta_tmp, "w", encoding="utf-8") as fh:
+            json.dump(metadata, fh, indent=2)
+        os.replace(meta_tmp, meta_path)
+    except OSError as exc:
+        logger.error(
+            "write_model_architecture: failed to write metadata %s: %s", meta_path, exc
+        )
+        try:
+            os.remove(meta_tmp)
+        except OSError:
+            pass
+        raise
+
+    logger.info(
+        "write_model_architecture: staged architecture '%s' -> %s",
+        new_model_name, py_path,
+    )
+    return py_path
