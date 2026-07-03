@@ -92,7 +92,11 @@ _REQUIRED_CONSENSUS_KEYS: frozenset[str] = frozenset({
 # Public API
 # ---------------------------------------------------------------------------
 
-def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, Any]:
+def run_debate(
+    disease: str,
+    leaderboard_context: dict[str, Any],
+    provider: str = "gemini",
+) -> dict[str, Any]:
     """Run the 4-step expert debate and return the full debate trail.
 
     Parameters
@@ -100,8 +104,11 @@ def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, A
     disease : str
         Disease protein name (e.g. "alpha_synuclein", "tau").
     leaderboard_context : dict
-        Recent leaderboard data — passed as JSON to all personas for context.
+        Recent leaderboard data -- passed as JSON to all personas for context.
         Typically the output of tracking.db.get_leaderboard() filtered by disease.
+    provider : str
+        LLM provider for all 4 debate calls.  One of "gemini" (default, free),
+        "groq" (free, very low latency), "anthropic" (paid, highest quality).
 
     Returns
     -------
@@ -134,6 +141,7 @@ def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, A
             "hypothesis for why the model misses High-aggregation peptides and what "
             "biological features should be emphasised next."
         ),
+        provider=provider,
     )
     logger.info("run_debate: biology proposal received (%d chars)", len(biology_proposal))
 
@@ -150,6 +158,7 @@ def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, A
             "and provide a concrete experiment specification with model name, "
             "hyperparameters, and target_type."
         ),
+        provider=provider,
     )
     logger.info("run_debate: ML critique received (%d chars)", len(ml_critique))
 
@@ -166,6 +175,7 @@ def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, A
             "Assess the statistical validity of the proposed experiment.  "
             "End with a clear VERDICT: APPROVE, APPROVE_WITH_CAUTION, or REJECT."
         ),
+        provider=provider,
     )
     logger.info("run_debate: stats validation received (%d chars)", len(stats_validation))
 
@@ -181,8 +191,9 @@ def run_debate(disease: str, leaderboard_context: dict[str, Any]) -> dict[str, A
         system_prompt=arbiter_system,
         user_message=(
             "Synthesise the three expert inputs into a single consensus experiment "
-            "specification.  Output ONLY the required JSON block — no prose."
+            "specification.  Output ONLY the required JSON block -- no prose."
         ),
+        provider=provider,
     )
     logger.info("run_debate: arbiter response received (%d chars)", len(arbiter_raw))
 

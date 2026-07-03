@@ -154,7 +154,7 @@ def node_load_leaderboard(state: AgentState) -> dict:
     return {"leaderboard": ctx}
 
 
-def node_run_debate(state: AgentState) -> dict:
+def node_run_debate(state: AgentState, provider: str = "gemini") -> dict:
     """Node 3: Run the 4-expert debate -> consensus hyperparameter proposal.
 
     Catches all exceptions from the LLM call chain so a transient API error
@@ -162,11 +162,15 @@ def node_run_debate(state: AgentState) -> dict:
     On failure the consensus is set to None; node_stage_experiment detects
     this and short-circuits to SKIPPED so the cycle completes cleanly.
     """
-    logger.info("node_run_debate: starting debate for disease=%r.", state["disease"])
+    logger.info(
+        "node_run_debate: starting debate for disease=%r (provider=%s).",
+        state["disease"], provider,
+    )
     try:
         result = run_debate(
             disease=state["disease"],
             leaderboard_context=state["leaderboard"],
+            provider=provider,
         )
         logger.info(
             "node_run_debate: debate complete -- model=%s, hyperparams=%s.",
@@ -338,6 +342,7 @@ def build_graph(
     budget: Budget,
     versioning: Versioning,
     checkpoint: Checkpoint,
+    provider: str = "gemini",
 ) -> Any:
     """Build and compile the LangGraph state machine.
 
@@ -347,6 +352,9 @@ def build_graph(
         Pre-initialised infrastructure objects.  Passed into nodes via
         closure — LangGraph node functions can accept a state arg only,
         so we use functools.partial to inject dependencies cleanly.
+    provider : str
+        LLM provider for all debate calls.  One of "gemini" (default),
+        "groq", "anthropic".
 
     Returns
     -------
@@ -361,7 +369,8 @@ def build_graph(
     graph.add_node("check_budget",
         functools.partial(node_check_budget, budget=budget))
     graph.add_node("load_leaderboard", node_load_leaderboard)
-    graph.add_node("run_debate",       node_run_debate)
+    graph.add_node("run_debate",
+        functools.partial(node_run_debate, provider=provider))
     graph.add_node("stage_experiment", node_stage_experiment)
     graph.add_node("audit_promote",
         functools.partial(node_audit_promote, versioning=versioning, checkpoint=checkpoint))
@@ -401,6 +410,7 @@ def run_agent_loop(
     db_path: str = "tracking/neuroagent.db",
     max_experiments_per_day: int = 10,
     max_cycles: int = 5,
+    provider: str = "gemini",
     budget_state_path: str = "platform_core/.budget_state.json",
     checkpoint_state_path: str = "platform_core/.checkpoint_state.json",
     repo_path: str = ".",
@@ -483,6 +493,7 @@ def run_agent_loop(
         budget=budget,
         versioning=versioning,
         checkpoint=ckpt,
+        provider=provider,
     )
 
     final_state = compiled.invoke(initial_state)

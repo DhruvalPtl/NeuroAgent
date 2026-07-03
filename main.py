@@ -160,20 +160,28 @@ def cmd_run_once(args: argparse.Namespace) -> None:
 def cmd_run_agent(args: argparse.Namespace) -> None:
     """Start (or resume) the autonomous agent loop."""
     import os
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+
+    _PROVIDER_ENV_KEYS = {
+        "gemini":    "GEMINI_API_KEY",
+        "groq":      "GROQ_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
+    required_key = _PROVIDER_ENV_KEYS[args.provider]
+    if not os.environ.get(required_key):
         logger.error(
-            "ANTHROPIC_API_KEY is not set.\n"
+            "%s is not set.\n"
             "Set it before running the agent:\n"
-            "  $env:ANTHROPIC_API_KEY = 'sk-ant-...'"
+            "  $env:%s = '...'",
+            required_key, required_key,
         )
         sys.exit(1)
 
     from agent.orchestrator import run_agent_loop
 
     logger.info(
-        "Starting agent loop: disease=%s, max_cycles=%d, "
+        "Starting agent loop: disease=%s, provider=%s, max_cycles=%d, "
         "max_experiments_per_day=%d",
-        args.disease, args.max_cycles, args.max_experiments_per_day,
+        args.disease, args.provider, args.max_cycles, args.max_experiments_per_day,
     )
 
     summary = run_agent_loop(
@@ -181,6 +189,7 @@ def cmd_run_agent(args: argparse.Namespace) -> None:
         db_path=args.db_path,
         max_experiments_per_day=args.max_experiments_per_day,
         max_cycles=args.max_cycles,
+        provider=args.provider,
     )
 
     lines = [
@@ -282,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run-agent",
         help=(
             "Start (or resume) the autonomous agent loop. "
-            "Requires ANTHROPIC_API_KEY in environment."
+            "Default provider: gemini (free, needs GEMINI_API_KEY)."
         ),
     )
     p_agent.add_argument(
@@ -312,6 +321,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Daily hard cap on experiments (default: 10). "
             "Persisted in platform_core/.budget_state.json — survives restarts."
+        ),
+    )
+    p_agent.add_argument(
+        "--provider",
+        choices=["gemini", "groq", "anthropic"],
+        default="gemini",
+        metavar="PROVIDER",
+        help=(
+            "LLM provider for debate loop (default: gemini). "
+            "gemini: free, needs GEMINI_API_KEY. "
+            "groq: free+fast, needs GROQ_API_KEY. "
+            "anthropic: paid, needs ANTHROPIC_API_KEY."
         ),
     )
     p_agent.add_argument(

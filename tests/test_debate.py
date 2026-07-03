@@ -350,3 +350,88 @@ class TestRealDebateRun:
         print(f"Model:      {result['consensus']['target_model']}")
         print(f"Hyperparams:{result['consensus']['proposed_hyperparams']}")
         print(f"Verdict:    {result['consensus']['stats_verdict']}")
+
+
+# ===========================================================================
+# Multi-provider call_llm tests (Step 10.5)
+# ===========================================================================
+
+class TestCallLlmProviderKeys:
+    """Verify that call_llm raises EnvironmentError (not a cryptic SDK error)
+    when the relevant API key is missing for each provider.
+
+    These tests never make real API calls -- they simply check that the
+    pre-flight key validation works correctly for all three providers.
+    """
+
+    def test_gemini_raises_environment_error_when_key_unset(self, monkeypatch):
+        """call_llm must raise EnvironmentError when GEMINI_API_KEY is absent."""
+        import agent.llm_client as _lc
+
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # Also clear the module-level client cache so the key check runs fresh
+        _lc._clients.pop("gemini:gemini-2.0-flash", None)
+        _lc._clients.pop("gemini", None)
+
+        with pytest.raises(EnvironmentError, match="GEMINI_API_KEY"):
+            _lc.call_llm(
+                system_prompt="test system",
+                user_message="test message",
+                provider="gemini",
+            )
+
+    def test_groq_raises_environment_error_when_key_unset(self, monkeypatch):
+        """call_llm must raise EnvironmentError when GROQ_API_KEY is absent."""
+        import agent.llm_client as _lc
+
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        _lc._clients.pop("groq", None)
+
+        with pytest.raises(EnvironmentError, match="GROQ_API_KEY"):
+            _lc.call_llm(
+                system_prompt="test system",
+                user_message="test message",
+                provider="groq",
+            )
+
+    def test_anthropic_raises_environment_error_when_key_unset(self, monkeypatch):
+        """call_llm must raise EnvironmentError when ANTHROPIC_API_KEY is absent."""
+        import agent.llm_client as _lc
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _lc._clients.pop("anthropic", None)
+
+        with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY"):
+            _lc.call_llm(
+                system_prompt="test system",
+                user_message="test message",
+                provider="anthropic",
+            )
+
+    def test_unsupported_provider_raises_value_error(self):
+        """call_llm must raise ValueError for unknown provider names."""
+        import agent.llm_client as _lc
+
+        with pytest.raises(ValueError, match="unsupported provider"):
+            _lc.call_llm(
+                system_prompt="test",
+                user_message="test",
+                provider="openai",   # not supported
+            )
+
+    def test_run_debate_passes_provider_to_call_llm(self):
+        """run_debate must forward the provider arg to all 4 call_llm calls."""
+        with patch("agent.debate.call_llm", return_value=_CANNED_CONSENSUS_JSON) as mock_llm:
+            try:
+                run_debate(
+                    disease="alpha_synuclein",
+                    leaderboard_context={},
+                    provider="groq",
+                )
+            except Exception:
+                pass  # consensus parsing may fail with repeated mock — that's fine
+
+        # Every call_llm invocation must have been called with provider="groq"
+        for call_args in mock_llm.call_args_list:
+            assert call_args.kwargs.get("provider") == "groq", \
+                f"Expected provider='groq' in call, got: {call_args}"

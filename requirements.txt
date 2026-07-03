@@ -11,4 +11,6 @@ openpyxl
 torch
 transformers
 anthropic
+google-generativeai
+groq
 
