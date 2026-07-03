@@ -287,9 +287,11 @@ def node_run_experiment(
             "experiment_result": {k: v for k, v in result.items()
                                   if isinstance(v, (str, int, float, bool, type(None)))},
         })
+        metrics = result.get("metrics") or {}
         logger.info(
-            "node_run_experiment: complete — macro_f1=%.4f, qwk=%.4f.",
-            result.get("macro_f1", 0.0), result.get("quadratic_weighted_kappa", 0.0),
+            "node_run_experiment: complete -- macro_f1=%.4f, qwk=%.4f.",
+            metrics.get("macro_f1", 0.0),
+            metrics.get("quadratic_weighted_kappa", 0.0),
         )
         return {"experiment_result": result}
     except Exception as exc:
@@ -301,13 +303,14 @@ def node_checkpoint(
     state: AgentState, checkpoint: Checkpoint
 ) -> dict:
     """Node 7: Persist full cycle state for mid-run resume."""
-    exp = state.get("experiment_result") or {}
+    exp     = state.get("experiment_result") or {}
+    metrics = exp.get("metrics") or {}
     checkpoint.save("end_of_cycle", {
         "cycle":          state["cycle"],
         "disease":        state["disease"],
         "promote_result": state.get("promote_result"),
-        "macro_f1":       exp.get("macro_f1"),
-        "qwk":            exp.get("quadratic_weighted_kappa"),
+        "macro_f1":       metrics.get("macro_f1"),
+        "qwk":            metrics.get("quadratic_weighted_kappa"),
         "timestamp":      datetime.now(timezone.utc).isoformat(),
     })
     logger.info("node_checkpoint: cycle %d state saved.", state["cycle"])

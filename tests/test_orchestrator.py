@@ -263,14 +263,20 @@ class TestNodeRunExperiment:
             debate_result=_CANNED_DEBATE_RESULT,
             promote_result="abc1234",
         )
-        mock_result = {"macro_f1": 0.45, "quadratic_weighted_kappa": 0.40, "status": "completed"}
+        mock_result = {
+            "metrics": {
+                "macro_f1": 0.45,
+                "quadratic_weighted_kappa": 0.40,
+            },
+            "status": "completed",
+        }
         with patch("agent.orchestrator.run_experiment_once", return_value=mock_result):
             result = node_run_experiment(
                 state,
                 budget=_mock_budget(),
                 checkpoint=_mock_checkpoint(),
             )
-        assert result["experiment_result"]["macro_f1"] == 0.45
+        assert result["experiment_result"]["metrics"]["macro_f1"] == 0.45
 
     def test_budget_record_called_after_successful_run(self):
         state  = _make_state(
@@ -279,7 +285,7 @@ class TestNodeRunExperiment:
         )
         budget = _mock_budget()
         with patch("agent.orchestrator.run_experiment_once",
-                   return_value={"macro_f1": 0.45, "quadratic_weighted_kappa": 0.40}):
+                   return_value={"metrics": {"macro_f1": 0.45, "quadratic_weighted_kappa": 0.40}}):
             node_run_experiment(state, budget=budget, checkpoint=_mock_checkpoint())
         budget.record_experiment.assert_called_once()
 
@@ -300,6 +306,33 @@ class TestNodeRunExperiment:
             )
         assert result["experiment_result"]["status"] == "pipeline_error"
         assert "Out of memory" in result["experiment_result"]["error"]
+
+    def test_log_shows_real_metrics_not_zeros(self, caplog):
+        """node_run_experiment must log the actual macro_f1 from result['metrics'],
+        not the always-zero value from the top-level result dict."""
+        import logging
+        state = _make_state(
+            debate_result=_CANNED_DEBATE_RESULT,
+            promote_result="abc1234",
+        )
+        mock_result = {
+            "metrics": {
+                "macro_f1": 0.7654,
+                "quadratic_weighted_kappa": 0.6543,
+            },
+        }
+        with caplog.at_level(logging.INFO, logger="agent.orchestrator"), \
+             patch("agent.orchestrator.run_experiment_once", return_value=mock_result):
+            node_run_experiment(state, budget=_mock_budget(), checkpoint=_mock_checkpoint())
+
+        # The logged message must contain the real value, NOT 0.0000
+        log_text = " ".join(caplog.messages)
+        assert "macro_f1=0.7654" in log_text, (
+            f"Expected 'macro_f1=0.7654' in log, but log was:\n{log_text}"
+        )
+        assert "macro_f1=0.0000" not in log_text, (
+            f"Log still shows the placeholder 0.0000 bug:\n{log_text}"
+        )
 
 
 # ===========================================================================
