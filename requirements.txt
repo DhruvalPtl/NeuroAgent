@@ -11,7 +11,7 @@ openpyxl
 torch
 transformers
 anthropic
-google-generativeai
+google-genai
 groq
 python-dotenv
 

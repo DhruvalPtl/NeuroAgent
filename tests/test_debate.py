@@ -369,8 +369,6 @@ class TestCallLlmProviderKeys:
         import agent.llm_client as _lc
 
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        # Also clear the module-level client cache so the key check runs fresh
-        _lc._clients.pop("gemini:gemini-2.5-flash", None)
         _lc._clients.pop("gemini", None)
 
         with pytest.raises(EnvironmentError, match="GEMINI_API_KEY"):

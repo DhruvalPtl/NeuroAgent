@@ -97,11 +97,10 @@ _RETRY_BACKOFF_SEC   = 5.0   # seconds to wait before single retry
 _clients: dict[str, object] = {}
 
 
-def _get_gemini_client(model_name: str):
-    """Return (or create) a cached Gemini GenerativeModel."""
-    cache_key = f"gemini:{model_name}"
-    if cache_key in _clients:
-        return _clients[cache_key]
+def _get_gemini_client():
+    """Return (or create) a cached Google GenAI Client."""
+    if "gemini" in _clients:
+        return _clients["gemini"]
 
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
@@ -111,20 +110,17 @@ def _get_gemini_client(model_name: str):
             "  $env:GEMINI_API_KEY = 'AIza...'"
         )
     try:
-        import google.generativeai as genai  # type: ignore[import]
+        from google import genai  # type: ignore[import]
     except ImportError as exc:
         raise ImportError(
-            "google-generativeai package is required for Gemini calls.\n"
-            "Install with: pip install google-generativeai"
+            "google-genai package is required for Gemini calls.\n"
+            "Install with: pip install google-genai"
         ) from exc
 
-    genai.configure(api_key=api_key)
-    # system_instruction is set per-call (not here) because the debate
-    # loop uses 4 different system prompts in the same process.
-    logger.info("Gemini client configured (model: %s)", model_name)
-    # Store a sentinel so we don't reconfigure on every call
-    _clients[cache_key] = genai
-    return genai
+    client = genai.Client(api_key=api_key)
+    _clients["gemini"] = client
+    logger.info("Google GenAI client initialised")
+    return client
 
 
 def _get_groq_client():
@@ -191,29 +187,20 @@ def _call_gemini(
     user_message: str,
     model: str,
     max_tokens: int,
+    client,
 ) -> str:
     """Single attempt at a Gemini API call. Returns text or raises."""
-    import google.generativeai as genai  # type: ignore[import]
+    from google.genai import types  # type: ignore[import]
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY environment variable is not set.\n"
-            "Get a free key at https://aistudio.google.com/apikey and set it:\n"
-            "  $env:GEMINI_API_KEY = 'AIza...'"
-        )
-    genai.configure(api_key=api_key)
-
-    import google.generativeai as genai_fresh  # noqa: F811
-    model_obj = genai_fresh.GenerativeModel(
-        model,
-        system_instruction=system_prompt,
+    response = client.models.generate_content(
+        model=model,
+        contents=user_message,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=max_tokens,
+        ),
     )
-    response = model_obj.generate_content(
-        user_message,
-        generation_config={"max_output_tokens": max_tokens},
-    )
-    return response.text
+    return response.text or ""
 
 
 def _call_groq(
@@ -314,7 +301,7 @@ def call_llm(
     # Pre-flight: validate API key presence BEFORE entering retry loop
     # (key errors are not transient -- no point retrying)
     if provider.startswith("gemini"):
-        _get_gemini_client(resolved_model)   # raises EnvironmentError if key absent
+        _get_gemini_client()   # raises EnvironmentError if key absent
     elif provider == "groq":
         groq_client = _get_groq_client()     # raises EnvironmentError if key absent
     elif provider == "anthropic":
@@ -333,7 +320,10 @@ def call_llm(
 
         try:
             if provider.startswith("gemini"):
-                result = _call_gemini(system_prompt, user_message, resolved_model, max_tokens)
+                result = _call_gemini(
+                    system_prompt, user_message, resolved_model, max_tokens,
+                    client=_get_gemini_client(),
+                )
             elif provider == "groq":
                 result = _call_groq(
                     system_prompt, user_message, resolved_model, max_tokens,
