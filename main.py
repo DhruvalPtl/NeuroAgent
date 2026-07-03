@@ -170,6 +170,8 @@ def cmd_run_agent(args: argparse.Namespace) -> None:
 
     _PROVIDER_ENV_KEYS = {
         "gemini":    "GEMINI_API_KEY",
+        "gemini3.5": "GEMINI_API_KEY",
+        "gemini3.1": "GEMINI_API_KEY",
         "groq":      "GROQ_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
     }
@@ -332,12 +334,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_agent.add_argument(
         "--provider",
-        choices=["gemini", "groq", "anthropic"],
+        choices=["gemini", "gemini3.5", "gemini3.1", "groq", "anthropic"],
         default="gemini",
         metavar="PROVIDER",
         help=(
             "LLM provider for debate loop (default: gemini). "
-            "gemini: free, needs GEMINI_API_KEY. "
+            "gemini/gemini3.5/gemini3.1: free, needs GEMINI_API_KEY. "
             "groq: free+fast, needs GROQ_API_KEY. "
             "anthropic: paid, needs ANTHROPIC_API_KEY."
         ),

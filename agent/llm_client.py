@@ -76,9 +76,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PROVIDER_DEFAULTS: dict[str, str] = {
-    "gemini":    "gemini-2.",
-    "groq":      "llama-3.3-70b-versatile",
-    "anthropic": "claude-sonnet-4-5",
+    "gemini":                 "gemini-2.5-flash",
+    "gemini-2.5-flash":       "gemini-2.5-flash",
+    "gemini-2.5-flash-lite":  "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite":  "gemini-3.1-flash-lite",
+    "gemini-3.5-flash":       "gemini-3.5-flash",
+    "groq":                   "llama-3.3-70b-versatile",
+    "anthropic":              "claude-sonnet-4-5",
 }
 
 _SUPPORTED_PROVIDERS = frozenset(_PROVIDER_DEFAULTS.keys())
@@ -309,7 +313,7 @@ def call_llm(
 
     # Pre-flight: validate API key presence BEFORE entering retry loop
     # (key errors are not transient -- no point retrying)
-    if provider == "gemini":
+    if provider.startswith("gemini"):
         _get_gemini_client(resolved_model)   # raises EnvironmentError if key absent
     elif provider == "groq":
         groq_client = _get_groq_client()     # raises EnvironmentError if key absent
@@ -328,7 +332,7 @@ def call_llm(
             time.sleep(_RETRY_BACKOFF_SEC)
 
         try:
-            if provider == "gemini":
+            if provider.startswith("gemini"):
                 result = _call_gemini(system_prompt, user_message, resolved_model, max_tokens)
             elif provider == "groq":
                 result = _call_groq(
