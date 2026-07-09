@@ -12,6 +12,13 @@ __pycache__/
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
+
+# Large local external/lab data files — referenced by path in
+# config/external_sources.yaml and the lab data loader, not committed.
+# Same convention as data/raw/* exclusion from Step 0.
+data/CPAD/
+data/waltzdb_export.csv
+data/Data for different peptide sequences.xlsx
 !data/processed/.gitkeep
 !data/raw/alpha_synuclein/.gitkeep
 !data/raw/tau/.gitkeep
