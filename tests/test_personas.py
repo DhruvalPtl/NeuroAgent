@@ -197,11 +197,12 @@ class TestArbiterPersona:
         assert "dropout_1" in text            # esm2_coral
 
     def test_milestone_scope_boundary(self):
-        """Arbiter must warn against inventing new models."""
+        """Arbiter must describe both proposal types and reference new_architecture."""
         text = _fill(ARBITER_PERSONA)
         lower = text.lower()
-        assert "milestone 2" in lower or "novel architecture" in lower, \
-            "Arbiter must reference Milestone 2 / novel-architecture scope boundary"
+        # Milestone 2: arbiter now SUPPORTS new_architecture via proposal_type field
+        assert "new_architecture" in lower or "proposal_type" in lower, \
+            "Arbiter must reference new_architecture / proposal_type for Milestone 2 scope"
 
     def test_json_output_keys_specified(self):
         """Arbiter must specify all required output keys in the prompt."""

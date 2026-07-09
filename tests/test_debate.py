@@ -28,6 +28,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agent.debate import (
+    _REQUIRED_CONSENSUS_KEYS_COMMON,
+    _REQUIRED_CONSENSUS_KEYS_HYPER,
     _VALID_MODEL_PARAMS,
     _VALID_TARGET_TYPES,
     _extract_json,
@@ -65,13 +67,14 @@ _CANNED_STATS = (
 )
 
 _CANNED_CONSENSUS_JSON = json.dumps({
-    "hypothesis": "Increasing dropout_1 and reducing learning_rate for esm2_coral will improve generalisation on max_label alpha_synuclein data.",
-    "rationale": "Biology expert identified PTM-positional gap; ML expert proposed regularisation changes; stats expert cautioned about noise floor but approved.",
-    "target_disease": "alpha_synuclein",
-    "target_model": "esm2_coral",
+    "proposal_type":    "hyperparameter_tweak",
+    "hypothesis":       "Increasing dropout_1 and reducing learning_rate for esm2_coral will improve generalisation on max_label alpha_synuclein data.",
+    "rationale":        "Biology expert identified PTM-positional gap; ML expert proposed regularisation changes; stats expert cautioned about noise floor but approved.",
+    "target_disease":   "alpha_synuclein",
+    "target_model":     "esm2_coral",
     "proposed_hyperparams": {"dropout_1": 0.4, "learning_rate": 0.0001},
-    "target_type": "max_label",
-    "stats_verdict": "APPROVE_WITH_CAUTION",
+    "target_type":      "max_label",
+    "stats_verdict":    "APPROVE_WITH_CAUTION",
 })
 
 _CANNED_RESPONSES = [
@@ -174,7 +177,7 @@ class TestRunDebateReturnValue:
 
     def test_consensus_has_required_keys(self, debate_result):
         consensus = debate_result["consensus"]
-        for key in ("hypothesis", "rationale", "target_disease",
+        for key in ("proposal_type", "hypothesis", "rationale", "target_disease",
                     "target_model", "proposed_hyperparams",
                     "target_type", "stats_verdict"):
             assert key in consensus
@@ -207,6 +210,7 @@ class TestConsensusValidation:
     def _consensus_with(self, **overrides):
         """Build a valid base consensus dict and override specified keys."""
         base = {
+            "proposal_type":     "hyperparameter_tweak",
             "hypothesis":        "Test hypothesis.",
             "rationale":         "Test rationale.",
             "target_disease":    _DISEASE,
@@ -240,6 +244,7 @@ class TestConsensusValidation:
 
     def test_missing_required_key_raises_value_error(self):
         base = {
+            "proposal_type":  "hyperparameter_tweak",
             "hypothesis":    "test",
             "rationale":     "test",
             "target_disease": _DISEASE,
@@ -248,7 +253,7 @@ class TestConsensusValidation:
             # "target_type" deliberately missing
             "stats_verdict": "APPROVE",
         }
-        with pytest.raises(ValueError, match="missing required keys"):
+        with pytest.raises(ValueError, match="missing required"):
             _parse_and_validate_consensus(json.dumps(base), _DISEASE)
 
     def test_invalid_json_raises_value_error(self):

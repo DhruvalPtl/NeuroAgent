@@ -14,17 +14,25 @@ Run order:
 Each call builds on the previous, creating a genuine critique chain rather
 than 4 independent LLM calls that happen to be concatenated.
 
-Consensus validation
---------------------
-The arbiter is instructed to output a strict JSON block.  After parsing,
-we validate:
-  - "target_model" must be a registered model name
-  - "proposed_hyperparams" keys must all be valid for the chosen model
-  - "target_type" must be "per_concentration" or "max_label"
+Consensus validation (Milestone 2)
+------------------------------------
+The arbiter is instructed to output a strict JSON block with a "proposal_type"
+field.  After parsing, we branch on proposal_type:
 
-These checks prevent the agent from hallucinating new models or invalid
-hyperparameter names, which would cause a TypeError in get_model() or
-set_params() downstream.
+  "hyperparameter_tweak" (Milestone 1, default):
+    - target_model must be a registered model name
+    - proposed_hyperparams keys must all be valid for the chosen model
+    - target_type must be "per_concentration" or "max_label"
+
+  "new_architecture" (Milestone 2):
+    - new_model_name, architecture_code, base_class must be present
+    - base_class must equal "BaseModel"
+    - architecture_code must be syntactically valid Python (ast.parse)
+    - architecture_code must contain all five required BaseModel methods
+      (reuses code_writer._validate_required_methods for consistency)
+    - target_type must be "per_concentration" or "max_label"
+    Fail-fast: these checks happen BEFORE returning consensus, so that
+    code_writer.write_model_architecture never receives garbage code.
 
 Output
 ------
@@ -41,6 +49,7 @@ tracking DB (Step 8 schema):
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -82,9 +91,24 @@ _VALID_MODEL_PARAMS: dict[str, frozenset[str]] = {
 
 _VALID_TARGET_TYPES: frozenset[str] = frozenset({"per_concentration", "max_label"})
 
-_REQUIRED_CONSENSUS_KEYS: frozenset[str] = frozenset({
-    "hypothesis", "rationale", "target_disease", "target_model",
-    "proposed_hyperparams", "target_type", "stats_verdict",
+# Required keys for both proposal types (shared subset)
+_REQUIRED_CONSENSUS_KEYS_COMMON: frozenset[str] = frozenset({
+    "proposal_type", "hypothesis", "rationale", "target_disease",
+    "target_type", "stats_verdict",
+})
+
+# Additional required keys per proposal type
+_REQUIRED_CONSENSUS_KEYS_HYPER: frozenset[str] = frozenset({
+    "target_model", "proposed_hyperparams",
+})
+
+_REQUIRED_CONSENSUS_KEYS_ARCH: frozenset[str] = frozenset({
+    "new_model_name", "architecture_code", "base_class",
+})
+
+# The five abstract methods every BaseModel subclass must implement
+_REQUIRED_ARCH_METHODS: frozenset[str] = frozenset({
+    "fit", "predict", "predict_proba", "get_params", "set_params",
 })
 
 
@@ -114,13 +138,15 @@ def run_debate(
     -------
     dict with keys: proposal, critique, validation, consensus, timestamp.
       consensus is a parsed dict (not a string) validated against the model
-      registry to ensure all proposed hyperparameters are legal.
+      registry (hyperparameter_tweak) or AST-checked (new_architecture).
 
     Raises
     ------
     ValueError
         If the arbiter's JSON cannot be parsed, is missing required keys,
-        proposes an unknown model name, or contains invalid hyperparameter keys.
+        proposes an unknown model name, contains invalid hyperparameter keys,
+        or (for new_architecture) the architecture_code has syntax errors or
+        is missing required BaseModel methods.
     RuntimeError
         If any LLM call fails after retries (propagated from call_llm).
     """
@@ -154,9 +180,9 @@ def run_debate(
     ml_critique = call_llm(
         system_prompt=ml_system,
         user_message=(
-            "Critique the biology expert's proposal from an ML feasibility perspective "
-            "and provide a concrete experiment specification with model name, "
-            "hyperparameters, and target_type."
+            "Critique the biology expert's proposal from an ML feasibility perspective. "
+            "Choose ACTION A (hyperparameter tweak) or ACTION B (new architecture) "
+            "and provide the corresponding JSON block."
         ),
         provider=provider,
     )
@@ -191,7 +217,7 @@ def run_debate(
         system_prompt=arbiter_system,
         user_message=(
             "Synthesise the three expert inputs into a single consensus experiment "
-            "specification.  Output ONLY the required JSON block -- no prose."
+            "specification.  Output ONLY the required JSON block — no prose."
         ),
         provider=provider,
     )
@@ -199,10 +225,11 @@ def run_debate(
 
     # ── Parse and validate consensus ─────────────────────────────────────────
     consensus = _parse_and_validate_consensus(arbiter_raw, disease)
+    proposal_type = consensus.get("proposal_type", "hyperparameter_tweak")
     logger.info(
-        "run_debate: consensus validated — model=%s, hyperparams=%s",
-        consensus.get("target_model"),
-        consensus.get("proposed_hyperparams"),
+        "run_debate: consensus validated — proposal_type=%s, model=%s",
+        proposal_type,
+        consensus.get("target_model") or consensus.get("new_model_name"),
     )
 
     return {
@@ -221,9 +248,9 @@ def run_debate(
 def _parse_and_validate_consensus(raw: str, disease: str) -> dict[str, Any]:
     """Extract, parse, and validate the arbiter's JSON output.
 
+    Routes to the appropriate validator based on consensus["proposal_type"].
     Raises ValueError with a clear message for any violation.
     """
-    # Extract JSON block — the arbiter may occasionally wrap it in ```json fences
     json_str = _extract_json(raw)
 
     try:
@@ -241,25 +268,58 @@ def _parse_and_validate_consensus(raw: str, disease: str) -> dict[str, Any]:
             f"got {type(consensus).__name__}."
         )
 
-    # ── Required keys ────────────────────────────────────────────────────────
-    missing = _REQUIRED_CONSENSUS_KEYS - set(consensus.keys())
+    # ── Common required keys ────────────────────────────────────────────────
+    missing_common = _REQUIRED_CONSENSUS_KEYS_COMMON - set(consensus.keys())
+    if missing_common:
+        raise ValueError(
+            f"run_debate: arbiter consensus is missing required common keys: "
+            f"{sorted(missing_common)}.\nFull consensus: {consensus}"
+        )
+
+    # ── Route by proposal_type ──────────────────────────────────────────────
+    proposal_type = consensus.get("proposal_type", "hyperparameter_tweak")
+
+    if proposal_type == "new_architecture":
+        _validate_architecture_consensus(consensus)
+    elif proposal_type == "hyperparameter_tweak":
+        _validate_hyperparameter_consensus(consensus)
+    else:
+        raise ValueError(
+            f"run_debate: unknown proposal_type {proposal_type!r}.  "
+            f"Must be 'hyperparameter_tweak' or 'new_architecture'."
+        )
+
+    # ── target_type must be valid (both paths) ───────────────────────────────
+    tt = consensus.get("target_type", "")
+    if tt not in _VALID_TARGET_TYPES:
+        raise ValueError(
+            f"run_debate: invalid target_type {tt!r}.  "
+            f"Must be one of {sorted(_VALID_TARGET_TYPES)}."
+        )
+
+    # ── Normalise target_disease to match the disease argument ───────────────
+    consensus["target_disease"] = disease
+
+    return consensus
+
+
+def _validate_hyperparameter_consensus(consensus: dict[str, Any]) -> None:
+    """Validate a hyperparameter_tweak consensus (Milestone 1 logic, unchanged)."""
+    missing = _REQUIRED_CONSENSUS_KEYS_HYPER - set(consensus.keys())
     if missing:
         raise ValueError(
-            f"run_debate: arbiter consensus is missing required keys: "
+            f"run_debate: hyperparameter_tweak consensus missing keys: "
             f"{sorted(missing)}.\nFull consensus: {consensus}"
         )
 
-    # ── target_model must be a registered model ──────────────────────────────
     target_model = consensus["target_model"]
     if target_model not in _VALID_MODEL_PARAMS:
         raise ValueError(
             f"run_debate: arbiter proposed unknown model {target_model!r}.  "
-            f"Valid models (Milestone 1): {sorted(_VALID_MODEL_PARAMS)}.  "
-            f"Novel architectures are Milestone 2 scope — reject this consensus "
-            f"and re-run the debate."
+            f"Valid models: {sorted(_VALID_MODEL_PARAMS)}.  "
+            f"Use proposal_type='new_architecture' to propose a genuinely new model."
         )
 
-    # ── proposed_hyperparams keys must be valid for chosen model ─────────────
     proposed_hp: dict = consensus.get("proposed_hyperparams", {})
     if not isinstance(proposed_hp, dict):
         raise ValueError(
@@ -276,18 +336,93 @@ def _parse_and_validate_consensus(raw: str, disease: str) -> dict[str, Any]:
             f"Valid keys: {sorted(valid_keys)}."
         )
 
-    # ── target_type must be valid ─────────────────────────────────────────────
-    tt = consensus.get("target_type", "")
-    if tt not in _VALID_TARGET_TYPES:
+
+def _validate_architecture_consensus(consensus: dict[str, Any]) -> None:
+    """Validate a new_architecture consensus.
+
+    Checks (in order, fail-fast):
+      1. Required keys present
+      2. base_class == "BaseModel"
+      3. architecture_code is syntactically valid Python (ast.parse)
+      4. architecture_code contains all 5 required BaseModel methods
+    """
+    missing = _REQUIRED_CONSENSUS_KEYS_ARCH - set(consensus.keys())
+    if missing:
         raise ValueError(
-            f"run_debate: invalid target_type {tt!r}.  "
-            f"Must be one of {sorted(_VALID_TARGET_TYPES)}."
+            f"run_debate: new_architecture consensus missing required keys: "
+            f"{sorted(missing)}.\nFull consensus: {consensus}"
         )
 
-    # ── Normalise target_disease to match the disease argument ───────────────
-    consensus["target_disease"] = disease
+    base_class = consensus.get("base_class", "")
+    if base_class != "BaseModel":
+        raise ValueError(
+            f"run_debate: new_architecture base_class must be 'BaseModel', "
+            f"got {base_class!r}."
+        )
 
-    return consensus
+    new_model_name = consensus.get("new_model_name", "")
+    if not new_model_name or not isinstance(new_model_name, str):
+        raise ValueError(
+            "run_debate: new_architecture new_model_name must be a non-empty string."
+        )
+
+    architecture_code: str = consensus.get("architecture_code", "")
+    if not architecture_code or not isinstance(architecture_code, str):
+        raise ValueError(
+            "run_debate: new_architecture architecture_code must be a non-empty string."
+        )
+
+    # ── Syntax check via ast.parse ──────────────────────────────────────────
+    # Wrap in a class shell so method defs parse correctly at the right indent.
+    _check_architecture_syntax_and_methods(architecture_code, new_model_name)
+
+
+def _check_architecture_syntax_and_methods(
+    architecture_code: str,
+    new_model_name: str,
+) -> None:
+    """Parse architecture_code and verify syntax + required methods.
+
+    Replicates the same logic as code_writer._validate_required_methods so
+    that debate.py can fail-fast BEFORE code_writer is ever called.
+
+    Raises
+    ------
+    ValueError
+        If any required method is missing.
+    SyntaxError
+        If the code cannot be parsed.
+    """
+    # Wrap in a class shell so method defs parse at the correct nesting level
+    wrapped = "class _Probe:\n"
+    for line in (architecture_code or "").splitlines():
+        wrapped += f"    {line}\n"
+    if not (architecture_code or "").strip():
+        wrapped += "    pass\n"
+
+    try:
+        tree = ast.parse(wrapped, filename=f"<architecture_code:{new_model_name}>")
+    except SyntaxError as exc:
+        raise SyntaxError(
+            f"run_debate: architecture_code for {new_model_name!r} has a syntax "
+            f"error: {exc}"
+        ) from exc
+
+    defined_methods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_Probe":
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    defined_methods.add(item.name)
+
+    missing = _REQUIRED_ARCH_METHODS - defined_methods
+    if missing:
+        raise ValueError(
+            f"run_debate: architecture_code for {new_model_name!r} is missing "
+            f"required BaseModel method(s): {sorted(missing)}.  "
+            f"All of {sorted(_REQUIRED_ARCH_METHODS)} must be implemented.  "
+            f"Found: {sorted(defined_methods)}."
+        )
 
 
 def _extract_json(text: str) -> str:

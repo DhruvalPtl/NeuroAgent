@@ -2,7 +2,7 @@
 agent/orchestrator.py
 ======================
 LangGraph agent orchestrator — the autonomous experiment loop for NeuroAgent
-Milestone 1.
+Milestone 2.
 
 State machine overview
 ----------------------
@@ -47,12 +47,14 @@ Uses `StateGraph` from langgraph (already in requirements.txt since Step
 10.1).  The state is a simple TypedDict — no memory, no persistence layer
 beyond our own Checkpoint class.
 
-Milestone 1 scope
------------------
-- Only tunes hyperparameters of EXISTING models.
-- Does NOT write .py files, does NOT generate new architectures.
-- The debate produces a JSON proposal; the auditor validates it; the
-  pipeline runs it.  That is the complete action surface.
+Milestone 2 update (Step 2.4)
+------------------------------
+node_stage_experiment now branches on consensus["proposal_type"]:
+- "hyperparameter_tweak" → write_hyperparameter_experiment  (Milestone 1)
+- "new_architecture"     → write_model_architecture         (Milestone 2)
+Both paths write a staged file and set state["staged_path"].  node_audit_promote
+already routes by file extension (.json vs .py) — no further changes required
+in any downstream node.
 """
 
 from __future__ import annotations
@@ -66,7 +68,7 @@ import yaml
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
-from agent.code_writer import write_hyperparameter_experiment
+from agent.code_writer import write_hyperparameter_experiment, write_model_architecture
 from agent.debate import run_debate
 from agent.promote import promote_experiment
 from platform_core.budget import Budget
@@ -187,7 +189,14 @@ def node_run_debate(state: AgentState, provider: str = "gemini") -> dict:
 
 
 def node_stage_experiment(state: AgentState) -> dict:
-    """Node 4: Write the consensus as a staged JSON experiment file.
+    """Node 4: Write the consensus as a staged experiment file.
+
+    Routes by consensus["proposal_type"]:
+      "hyperparameter_tweak" → write_hyperparameter_experiment → .json file
+      "new_architecture"     → write_model_architecture        → .py + .json pair
+
+    Both paths set state["staged_path"] and converge into node_audit_promote,
+    which already routes by file extension (.json vs .py) via promote_experiment.
 
     If the debate failed (consensus is None), skip staging entirely and
     return a SKIPPED promote_result so the graph flows through to
@@ -207,10 +216,29 @@ def node_stage_experiment(state: AgentState) -> dict:
             "promote_result": f"SKIPPED: debate failed ({error_msg})",
         }
 
-    staged_path = write_hyperparameter_experiment(
-        consensus=consensus,
-        hypothesis_id=debate.get("timestamp"),
-    )
+    proposal_type = consensus.get("proposal_type", "hyperparameter_tweak")
+
+    if proposal_type == "new_architecture":
+        logger.info(
+            "node_stage_experiment: routing to write_model_architecture "
+            "(new_model_name=%r).",
+            consensus.get("new_model_name"),
+        )
+        staged_path = write_model_architecture(
+            consensus=consensus,
+        )
+    else:
+        # Default: hyperparameter_tweak (Milestone 1 path, unchanged)
+        logger.info(
+            "node_stage_experiment: routing to write_hyperparameter_experiment "
+            "(model=%r).",
+            consensus.get("target_model"),
+        )
+        staged_path = write_hyperparameter_experiment(
+            consensus=consensus,
+            hypothesis_id=debate.get("timestamp"),
+        )
+
     logger.info("node_stage_experiment: staged -> %s", staged_path)
     return {"staged_path": staged_path}
 
