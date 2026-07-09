@@ -9,40 +9,45 @@ Design principles
    explicitly passes ``include_external=True`` to load_dataset().  This
    mirrors the ``allow_synthetic`` guardrail established in loader.py.
 
-2. **Source-type tagging.**  Every row from an external source carries
+2. **Local files only.**  All sources are static published datasets that
+   already live on disk.  There is no network download step.  A broken URL
+   would silently fail at download time, causing training to proceed with
+   missing data — which is worse than raising a hard error or omitting the
+   source.
+
+3. **Source-type tagging.**  Every row from an external source carries
    ``source_type = "external_public"``.  Lab-generated data carries
    ``source_type = "lab_generated"``.  The two are NEVER silently merged.
 
-3. **Cache-first downloads.**  External datasets are large static publications.
-   After the first successful download, the raw file is stored under
-   ``data/raw/external/{source_name}/``.  Subsequent calls skip the network.
-   Do NOT add cache invalidation here — if an upstream dataset is updated,
-   update the URL in ``config/external_sources.yaml`` instead, which changes
-   the cache path.
+4. **Per-row provenance via source_file.**  For mixed-provenance files
+   (e.g. APR information.xlsx which mixes AmyPro/CPAD/AmyLoad rows), the
+   actual per-row provenance value from ``provenance_col`` is written to
+   ``source_file``.  It is NOT collapsed to a single string.  Erasing
+   provenance is the same category of mistake as the alpha_synuclein
+   disease-mislabeling bug.
 
-4. **Fail loudly.**  A failed download raises immediately with the source URL
-   so the user knows exactly what to fix.  We never silently produce an empty
-   DataFrame.
+5. **Case-insensitive label matching.**  Classification columns in the
+   real data contain mixed-case variants (e.g. "Amyloid" and "amyloid",
+   "Non-amyloid" and "non-amyloid" all appear in cpad_peptides).
+   All label_map keys are normalised to lowercase before matching.
+   Rows whose label_col value does not match any key are DROPPED and
+   the count is logged — never silently assumed.
 
-5. **Label map is intentionally crude.**  Each source maps binary labels to
+6. **Label map is intentionally crude.**  Each source maps binary labels to
    ordinal endpoints {0, 3} only.  See config/external_sources.yaml for the
-   documented rationale.  This produces a class-distribution skew (no class 1
-   or 2 rows from external sources) — that is expected, not a bug.
+   documented rationale.
 
 Per-format adapters
 -------------------
-One function per format name registered in _ADAPTER_REGISTRY.  Adapters
-return a DataFrame with the internal schema columns:
-    peptide_sequence, label_ordinal, is_acetylated (always False),
-    source_file, source_type (always "external_public"),
-    data_snapshot_hash (set by load_external_dataset after concat),
-    concentration (always 0.0 — external data has no concentration axis),
-    sequence_id (auto-generated index string)
+Registered in _ADAPTER_REGISTRY by format name.  Each adapter receives:
+  - raw_df   : the raw pandas DataFrame already loaded by load_external_dataset
+  - cfg      : the full source config dict from external_sources.yaml
+Returns a DataFrame with the internal schema columns.
 
 Public API
 ----------
-    fetch_and_cache(source_name)         -> str  (path to cached file)
     load_external_dataset(source_name)   -> pd.DataFrame
+    list_available_sources()             -> list[str]
 """
 
 from __future__ import annotations
@@ -50,8 +55,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import pathlib
-import urllib.request
-import urllib.error
 from typing import Any, Callable
 
 import pandas as pd
@@ -63,11 +66,10 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT      = pathlib.Path(__file__).parent.parent.parent
-_CONFIG_PATH    = _REPO_ROOT / "config" / "external_sources.yaml"
-_CACHE_ROOT     = _REPO_ROOT / "data" / "raw" / "external"
+_REPO_ROOT   = pathlib.Path(__file__).parent.parent.parent
+_CONFIG_PATH = _REPO_ROOT / "config" / "external_sources.yaml"
 
-# Column values that are the same for every external row
+# Column values constant for every external row
 _EXTERNAL_SOURCE_TYPE = "external_public"
 _PLACEHOLDER_CONC     = 0.0   # external datasets have no concentration axis
 
@@ -101,77 +103,43 @@ def _source_cfg(source_name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Download / cache layer
+# Raw file loading
 # ---------------------------------------------------------------------------
 
-def _cache_path(source_name: str, url: str) -> pathlib.Path:
-    """Return the local cache file path for a given source + URL.
+def _load_raw(cfg: dict[str, Any]) -> pd.DataFrame:
+    """Load the raw DataFrame from disk according to source config.
 
-    Uses the URL's last path segment as the filename.  If the URL has no
-    obvious extension, falls back to 'raw_download.csv'.
+    Resolves the path relative to repo root. Supports CSV and xlsx.
+    Raises FileNotFoundError if the file does not exist.
     """
-    url_basename = url.rstrip("/").rsplit("/", 1)[-1] or "raw_download.csv"
-    if "." not in url_basename:
-        url_basename = "raw_download.csv"
-    return _CACHE_ROOT / source_name / url_basename
+    rel_path: str = cfg["path"]
+    abs_path = _REPO_ROOT / rel_path
 
-
-def fetch_and_cache(source_name: str) -> str:
-    """Download the raw dataset file if not already cached.
-
-    Parameters
-    ----------
-    source_name : str
-        Key from config/external_sources.yaml (e.g. "waltzdb", "amypro").
-
-    Returns
-    -------
-    str
-        Absolute path to the cached local file.
-
-    Raises
-    ------
-    KeyError
-        If source_name is not in external_sources.yaml.
-    RuntimeError
-        If the download fails (network error, HTTP error, etc.).
-        The error message includes the source URL so the user knows what to fix.
-    """
-    cfg = _source_cfg(source_name)
-    url = cfg["url"]
-    dest = _cache_path(source_name, url)
-
-    # Cache hit — skip download
-    if dest.exists() and dest.stat().st_size > 0:
-        logger.info(
-            "fetch_and_cache[%s]: cache hit → %s", source_name, dest
-        )
-        return str(dest)
-
-    # Cache miss — download
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(
-        "fetch_and_cache[%s]: downloading from %s → %s", source_name, url, dest
-    )
-    try:
-        urllib.request.urlretrieve(url, str(dest))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        # Clean up partial file so the next call re-tries
-        if dest.exists():
-            dest.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"fetch_and_cache[{source_name}]: download FAILED.\n"
-            f"  URL: {url}\n"
-            f"  Error: {exc}\n"
-            "Check your network connection and the URL in "
+    if not abs_path.exists():
+        raise FileNotFoundError(
+            f"external_datasets: source file not found: {abs_path}\n"
+            f"  Configured path: {rel_path!r}\n"
+            "  Place the file at the expected path or update "
             "config/external_sources.yaml."
-        ) from exc
+        )
+
+    suffix = abs_path.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(abs_path, dtype=str, low_memory=False)
+    elif suffix in {".xlsx", ".xls"}:
+        sheet = cfg.get("sheet")  # None → first sheet
+        df = pd.read_excel(abs_path, sheet_name=sheet, dtype=str)
+    else:
+        raise ValueError(
+            f"external_datasets: unsupported file format {suffix!r} "
+            f"for source at {abs_path}. Supported: .csv, .xlsx, .xls"
+        )
 
     logger.info(
-        "fetch_and_cache[%s]: download complete (%d bytes)",
-        source_name, dest.stat().st_size,
+        "_load_raw: loaded %d rows × %d cols from %s",
+        len(df), len(df.columns), abs_path,
     )
-    return str(dest)
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -183,253 +151,172 @@ def _make_row_id(source_name: str, index: int) -> str:
 
 
 def adapt_hexapeptide_binary(
-    raw_path: str,
-    label_map: dict[str, int],
+    raw_df: pd.DataFrame,
+    cfg: dict[str, Any],
+    source_name: str,
 ) -> pd.DataFrame:
-    """Adapter for WaltzDB-style hexapeptide binary datasets.
+    """Adapter for flat peptide lists with binary amyloid/non-amyloid labels.
 
-    Expected raw CSV columns (flexible — adapts to common WaltzDB variants):
-      - peptide / sequence / Sequence : the hexapeptide string
-      - label / class / amyloid       : binary label (string key in label_map)
+    Handles: waltzdb_export.csv and cpad_peptides (aggregating peptides.xlsx).
 
-    The URL at waltzdb.switchlab.org returns a TSV-like table.  We try both
-    comma and tab separators and accept whichever parses more columns.
+    Label matching is CASE-INSENSITIVE.  The real data contains mixed-case
+    variants ("Amyloid", "amyloid", "Non-amyloid", "non-amyloid") — all are
+    resolved via lowercase normalisation before map lookup.
+
+    Rows whose label value is not in label_map (after normalisation) are
+    dropped and the count is logged.  We never silently assume a label.
     """
-    source_name = pathlib.Path(raw_path).parent.name
+    seq_col   = cfg["sequence_col"]
+    lbl_col   = cfg["label_col"]
+    label_map = cfg.get("label_map", {})
 
-    # Try TSV first, then CSV
-    df_raw: pd.DataFrame | None = None
-    for sep in ("\t", ",", ";"):
-        try:
-            candidate = pd.read_csv(raw_path, sep=sep, dtype=str, low_memory=False)
-            if len(candidate.columns) >= 2:
-                df_raw = candidate
-                break
-        except Exception:
-            continue
+    # Validate required columns exist
+    for col in (seq_col, lbl_col):
+        if col not in raw_df.columns:
+            raise ValueError(
+                f"adapt_hexapeptide_binary[{source_name}]: required column "
+                f"{col!r} not found. Available: {list(raw_df.columns)}"
+            )
 
-    if df_raw is None or df_raw.empty:
-        raise ValueError(
-            f"adapt_hexapeptide_binary: could not parse {raw_path} as "
-            "TSV or CSV with ≥2 columns."
-        )
-
-    # Normalise column names to lowercase
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-
-    # Locate sequence column
-    seq_candidates = ["peptide", "sequence", "hexapeptide", "seq", "pep"]
-    seq_col = next((c for c in seq_candidates if c in df_raw.columns), None)
-    if seq_col is None:
-        raise ValueError(
-            f"adapt_hexapeptide_binary: no sequence column found in {raw_path}. "
-            f"Tried {seq_candidates}.  Available columns: {list(df_raw.columns)}"
-        )
-
-    # Locate label column
-    lbl_candidates = ["label", "class", "amyloid", "classification", "result", "type"]
-    lbl_col = next((c for c in lbl_candidates if c in df_raw.columns), None)
-    if lbl_col is None:
-        raise ValueError(
-            f"adapt_hexapeptide_binary: no label column found in {raw_path}. "
-            f"Tried {lbl_candidates}.  Available columns: {list(df_raw.columns)}"
-        )
-
-    df = df_raw[[seq_col, lbl_col]].copy()
+    df = raw_df[[seq_col, lbl_col]].copy()
     df.columns = ["peptide_sequence_raw", "label_raw"]
 
-    # Clean
+    # Clean sequences
     df["peptide_sequence"] = df["peptide_sequence_raw"].str.strip().str.upper()
     df = df.dropna(subset=["peptide_sequence"])
-    df = df[df["peptide_sequence"].str.len() > 0]
+    df = df[df["peptide_sequence"].str.len() > 0].copy()
 
-    # Map labels → ordinal
-    lbl_lower = df["label_raw"].str.strip().str.lower()
+    # Case-insensitive label mapping
     lm_lower = {k.lower(): v for k, v in label_map.items()}
-    df["label_ordinal"] = lbl_lower.map(lm_lower)
-    unmapped = df["label_ordinal"].isna().sum()
-    if unmapped > 0:
-        unique_raw = df.loc[df["label_ordinal"].isna(), "label_raw"].unique()[:5]
+    df["label_ordinal"] = (
+        df["label_raw"]
+        .str.strip()
+        .str.lower()
+        .map(lm_lower)
+    )
+
+    # Log and drop unmapped
+    unmapped_mask = df["label_ordinal"].isna()
+    n_unmapped = unmapped_mask.sum()
+    if n_unmapped > 0:
+        unique_raw = df.loc[unmapped_mask, "label_raw"].unique()[:10]
         logger.warning(
-            "adapt_hexapeptide_binary[%s]: %d rows had unmapped labels %s — dropped.",
-            source_name, unmapped, list(unique_raw),
+            "adapt_hexapeptide_binary[%s]: %d rows had labels not in "
+            "label_map %s — dropped.  Unrecognised values: %s",
+            source_name, n_unmapped, sorted(label_map), list(unique_raw),
         )
-        df = df[df["label_ordinal"].notna()]
+    df = df[~unmapped_mask].copy()
+
+    if df.empty:
+        raise ValueError(
+            f"adapt_hexapeptide_binary[{source_name}]: no rows remaining after "
+            "label mapping.  Check label_map in external_sources.yaml matches "
+            f"the actual values in the {lbl_col!r} column."
+        )
 
     df["label_ordinal"] = df["label_ordinal"].astype(int)
-
-    return _finalise_rows(df, source_name)
+    return _finalise_rows(df, source_name=source_name, source_file=f"{source_name}_external")
 
 
 def adapt_region_within_protein(
-    raw_path: str,
-    label_map: dict[str, int],
+    raw_df: pd.DataFrame,
+    cfg: dict[str, Any],
+    source_name: str,
 ) -> pd.DataFrame:
-    """Adapter for AmyPro-style region-within-protein databases.
+    """Adapter for protein-level databases with annotated amyloidogenic regions.
 
-    AmyPro provides full protein sequences with annotated amyloidogenic
-    sub-regions (start, end, sequence columns).  Following the evaluation
-    logic used by the CANYA paper (Ventura et al. 2026) for AmyPro:
+    Handles: APR information.xlsx which mixes AmyPro/CPAD/AmyLoad rows.
 
-      Positive rows: the annotated amyloidogenic REGION itself
-      Negative rows: the remaining (non-annotated) protein sequence,
-                     split into non-overlapping windows the same length
-                     as the annotated region
+    For each input row:
+      Positive rows:  the Experimental Aggregating Region substring itself
+      Negative rows:  non-overlapping windows of the remaining protein sequence,
+                      each the same length as the APR, labelled non-amyloidogenic
 
-    Expected CSV columns (flexible):
-      - region / peptide / sequence   : the amyloidogenic region string
-      - protein_sequence (optional)   : full protein (for negative generation)
-      - label / class                 : amyloid class string
+    PROVENANCE: the ``provenance_col`` value (e.g. "AmyPro", "CPAD",
+    "AmyLoad") is written to source_file for every output row from that
+    input row.  It is NOT collapsed to a single string.  This preserves
+    real per-row provenance instead of mislabelling mixed-source data.
     """
-    source_name = pathlib.Path(raw_path).parent.name
+    full_seq_col  = cfg["full_sequence_col"]
+    region_col    = cfg["region_col"]
+    prov_col      = cfg.get("provenance_col")
+    label_map     = cfg.get("label_map", {})
 
-    df_raw = None
-    for sep in (",", "\t", ";"):
-        try:
-            candidate = pd.read_csv(raw_path, sep=sep, dtype=str, low_memory=False)
-            if len(candidate.columns) >= 2:
-                df_raw = candidate
-                break
-        except Exception:
-            continue
-
-    if df_raw is None or df_raw.empty:
-        raise ValueError(
-            f"adapt_region_within_protein: could not parse {raw_path}."
-        )
-
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-
-    # Locate the region column
-    region_candidates = ["region", "peptide", "sequence", "amyloid_region",
-                         "amyloidogenic_region", "seq"]
-    region_col = next((c for c in region_candidates if c in df_raw.columns), None)
-    if region_col is None:
-        raise ValueError(
-            f"adapt_region_within_protein: no region column found in {raw_path}. "
-            f"Tried {region_candidates}. Available: {list(df_raw.columns)}"
-        )
-
-    # Locate label column
-    lbl_candidates = ["label", "class", "type", "classification"]
-    lbl_col = next((c for c in lbl_candidates if c in df_raw.columns), None)
-
-    rows: list[dict] = []
-    lm_lower = {k.lower(): v for k, v in label_map.items()}
     positive_ordinal = label_map.get("amyloidogenic_region", 3)
     negative_ordinal = label_map.get("non_amyloidogenic_region", 0)
 
-    for _, row_raw in df_raw.iterrows():
-        region_seq = str(row_raw.get(region_col, "")).strip().upper()
+    # Validate required columns
+    for col in (full_seq_col, region_col):
+        if col not in raw_df.columns:
+            raise ValueError(
+                f"adapt_region_within_protein[{source_name}]: required column "
+                f"{col!r} not found. Available: {list(raw_df.columns)}"
+            )
+    if prov_col and prov_col not in raw_df.columns:
+        logger.warning(
+            "adapt_region_within_protein[%s]: provenance_col %r not found — "
+            "falling back to source_name as source_file.",
+            source_name, prov_col,
+        )
+        prov_col = None
+
+    rows: list[dict] = []
+
+    for _, input_row in raw_df.iterrows():
+        region_seq = str(input_row.get(region_col, "") or "").strip().upper()
+        protein_seq = str(input_row.get(full_seq_col, "") or "").strip().upper()
+
         if not region_seq:
             continue
 
-        # Positive: the annotated amyloidogenic region
+        # Per-row provenance: use value from provenance_col if available
+        if prov_col:
+            provenance = str(input_row.get(prov_col, "") or "").strip()
+            # Fall back to source_name if the cell is empty/NaN
+            sf = provenance if provenance else source_name
+        else:
+            sf = source_name
+
+        # Positive row: the annotated amyloidogenic region itself
         rows.append({
             "peptide_sequence": region_seq,
             "label_ordinal":    positive_ordinal,
+            "source_file":      sf,
         })
 
-        # Negative: windows from remaining protein sequence (if available)
-        protein_seq = str(row_raw.get("protein_sequence", "") or "").strip().upper()
+        # Negative rows: non-overlapping windows from remaining protein sequence
         if protein_seq and region_seq in protein_seq and len(region_seq) >= 4:
+            # Remove ONE occurrence of the region to form the "remaining" sequence
             remaining = protein_seq.replace(region_seq, "", 1)
             window = len(region_seq)
             for start in range(0, len(remaining) - window + 1, window):
-                neg_seq = remaining[start : start + window]
-                if len(neg_seq) == window and neg_seq:
+                neg_seq = remaining[start: start + window]
+                if len(neg_seq) == window:
                     rows.append({
                         "peptide_sequence": neg_seq,
                         "label_ordinal":    negative_ordinal,
+                        "source_file":      sf,
                     })
 
     if not rows:
         raise ValueError(
-            f"adapt_region_within_protein: no rows extracted from {raw_path}."
+            f"adapt_region_within_protein[{source_name}]: no rows extracted. "
+            f"Check that {region_col!r} and {full_seq_col!r} contain valid sequences."
         )
 
     df = pd.DataFrame(rows)
-    return _finalise_rows(df, source_name)
-
-
-def adapt_massive_flat_peptide_list(
-    raw_path: str,
-    label_map: dict[str, int],
-) -> pd.DataFrame:
-    """Adapter for CANYA-style massive flat peptide list datasets.
-
-    Expected CSV columns:
-      - peptide / sequence : the peptide string
-      - label / class / nucleating / result : binary label
-
-    CANYA datasets typically have ~19 000 peptides in a flat CSV with
-    one row per peptide.
-    """
-    source_name = pathlib.Path(raw_path).parent.name
-
-    df_raw = None
-    for sep in (",", "\t", ";"):
-        try:
-            candidate = pd.read_csv(raw_path, sep=sep, dtype=str, low_memory=False)
-            if len(candidate.columns) >= 2:
-                df_raw = candidate
-                break
-        except Exception:
-            continue
-
-    if df_raw is None or df_raw.empty:
-        raise ValueError(
-            f"adapt_massive_flat_peptide_list: could not parse {raw_path}."
-        )
-
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-
-    seq_candidates = ["peptide", "sequence", "seq", "pep", "peptide_sequence"]
-    seq_col = next((c for c in seq_candidates if c in df_raw.columns), None)
-    if seq_col is None:
-        raise ValueError(
-            f"adapt_massive_flat_peptide_list: no sequence column found. "
-            f"Tried {seq_candidates}. Available: {list(df_raw.columns)}"
-        )
-
-    lbl_candidates = ["label", "class", "nucleating", "result",
-                       "amyloid", "classification"]
-    lbl_col = next((c for c in lbl_candidates if c in df_raw.columns), None)
-    if lbl_col is None:
-        raise ValueError(
-            f"adapt_massive_flat_peptide_list: no label column found. "
-            f"Tried {lbl_candidates}. Available: {list(df_raw.columns)}"
-        )
-
-    df = df_raw[[seq_col, lbl_col]].copy()
-    df.columns = ["peptide_sequence_raw", "label_raw"]
-    df["peptide_sequence"] = df["peptide_sequence_raw"].str.strip().str.upper()
-    df = df.dropna(subset=["peptide_sequence"])
-    df = df[df["peptide_sequence"].str.len() > 0]
-
-    lm_lower = {k.lower(): v for k, v in label_map.items()}
-    df["label_ordinal"] = df["label_raw"].str.strip().str.lower().map(lm_lower)
-    unmapped = df["label_ordinal"].isna().sum()
-    if unmapped > 0:
-        unique_raw = df.loc[df["label_ordinal"].isna(), "label_raw"].unique()[:5]
-        logger.warning(
-            "adapt_massive_flat_peptide_list[%s]: %d unmapped labels %s — dropped.",
-            source_name, unmapped, list(unique_raw),
-        )
-        df = df[df["label_ordinal"].notna()]
-
-    df["label_ordinal"] = df["label_ordinal"].astype(int)
-    return _finalise_rows(df, source_name)
+    return _finalise_rows(df, source_name=source_name, source_file=None)
 
 
 # ---------------------------------------------------------------------------
 # Adapter registry
 # ---------------------------------------------------------------------------
 
-_ADAPTER_REGISTRY: dict[str, Callable[[str, dict], pd.DataFrame]] = {
-    "hexapeptide_binary":        adapt_hexapeptide_binary,
-    "region_within_protein":     adapt_region_within_protein,
-    "massive_flat_peptide_list": adapt_massive_flat_peptide_list,
+AdapterFn = Callable[[pd.DataFrame, dict[str, Any], str], pd.DataFrame]
+
+_ADAPTER_REGISTRY: dict[str, AdapterFn] = {
+    "hexapeptide_binary":    adapt_hexapeptide_binary,
+    "region_within_protein": adapt_region_within_protein,
 }
 
 
@@ -437,25 +324,31 @@ _ADAPTER_REGISTRY: dict[str, Callable[[str, dict], pd.DataFrame]] = {
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _finalise_rows(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
-    """Add the mandatory schema columns common to all external sources.
+def _finalise_rows(
+    df: pd.DataFrame,
+    source_name: str,
+    source_file: str | None,
+) -> pd.DataFrame:
+    """Add mandatory schema columns common to all external sources.
 
-    Every external row receives:
-      source_type       = "external_public"
-      is_acetylated     = False  (no PTM annotation in external datasets)
-      concentration     = 0.0   (no concentration axis)
-      source_file       = "{source_name}_external"
-      sequence_id       = auto-index string
+    If ``source_file`` is None, the DataFrame is expected to already have a
+    ``source_file`` column (set per-row by the adapter, e.g. from provenance_col).
+    If ``source_file`` is not None, it is applied uniformly to all rows.
     """
     df = df.copy()
     df["source_type"]   = _EXTERNAL_SOURCE_TYPE
     df["is_acetylated"] = False
     df["concentration"] = _PLACEHOLDER_CONC
-    df["source_file"]   = f"{source_name}_external"
-    df["sequence_id"]   = [
+
+    if source_file is not None:
+        df["source_file"] = source_file
+    elif "source_file" not in df.columns:
+        df["source_file"] = source_name
+
+    df["sequence_id"] = [
         _make_row_id(source_name, i) for i in range(len(df))
     ]
-    # Guarantee column order matches schema expectation
+
     keep = [
         "sequence_id", "peptide_sequence", "concentration",
         "label_ordinal", "is_acetylated", "source_file", "source_type",
@@ -477,17 +370,12 @@ def _compute_external_hash(df: pd.DataFrame) -> str:
 # ---------------------------------------------------------------------------
 
 def load_external_dataset(source_name: str) -> pd.DataFrame:
-    """Download (if needed), adapt, and return a named external dataset.
-
-    Returns a DataFrame with columns matching the internal schema PLUS a
-    ``source_type`` column with value "external_public".  This column is
-    the critical provenance tag that separates external data from lab-
-    generated data in every downstream consumer.
+    """Load, adapt, and return a named external dataset from disk.
 
     Parameters
     ----------
     source_name : str
-        Key in config/external_sources.yaml (e.g. "waltzdb").
+        Key in config/external_sources.yaml (e.g. "waltzdb", "apr_regions").
 
     Returns
     -------
@@ -499,17 +387,15 @@ def load_external_dataset(source_name: str) -> pd.DataFrame:
     Raises
     ------
     KeyError
-        If source_name is unknown.
-    RuntimeError
-        If the download fails.
+        If source_name is not in external_sources.yaml.
+    FileNotFoundError
+        If the configured local file does not exist.
     ValueError
-        If the raw file cannot be parsed or produces zero rows.
+        If the file cannot be parsed, columns are missing, or no rows survive
+        label mapping.
     """
     cfg = _source_cfg(source_name)
-    raw_path = fetch_and_cache(source_name)
-
-    fmt   = cfg["format"]
-    lmap  = cfg.get("label_map", {})
+    fmt = cfg["format"]
 
     if fmt not in _ADAPTER_REGISTRY:
         raise ValueError(
@@ -517,17 +403,19 @@ def load_external_dataset(source_name: str) -> pd.DataFrame:
             f"{source_name!r}.  Registered formats: {sorted(_ADAPTER_REGISTRY)}."
         )
 
-    adapter = _ADAPTER_REGISTRY[fmt]
+    raw_df = _load_raw(cfg)
+
+    adapter: AdapterFn = _ADAPTER_REGISTRY[fmt]
     logger.info(
-        "load_external_dataset[%s]: running adapter %s on %s",
-        source_name, fmt, raw_path,
+        "load_external_dataset[%s]: running adapter %s on %d rows",
+        source_name, fmt, len(raw_df),
     )
-    df = adapter(raw_path, lmap)
+    df = adapter(raw_df, cfg, source_name)
 
     if df.empty:
         raise ValueError(
             f"load_external_dataset[{source_name}]: adapter returned an empty "
-            f"DataFrame from {raw_path}.  Inspect the raw file and adapter logic."
+            "DataFrame.  Inspect the source file and adapter logic."
         )
 
     df["data_snapshot_hash"] = _compute_external_hash(df)
