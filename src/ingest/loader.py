@@ -3,20 +3,35 @@ src/ingest/loader.py
 ====================
 Single entrypoint for all data loading in the NeuroAgent pipeline.
 
-  load_dataset(disease_config, sources=None, allow_synthetic=False)
+  load_dataset(disease_config, sources=None,
+               allow_synthetic=False, include_external=False)
     -> pd.DataFrame
 
 Composes real_data.load_real_peptide_data() (and optionally
-synthetic.make_synthetic_long_df()) rather than reimplementing
-parsing logic. Adds:
+synthetic.make_synthetic_long_df() and external_datasets.load_external_dataset())
+rather than reimplementing parsing logic.  Adds:
 
   - Auto-discovery of source files under raw_data_path
   - Synthetic file guardrail (allow_synthetic=False by default)
-  - Per-row provenance via source_file column
+  - External dataset opt-in (include_external=False by default)
+  - Per-row provenance via source_file and source_type columns
   - Conflict-aware deduplication (same pair, different labels → keep
     both + warn; same pair, same label → collapse to one)
+  - Cross-source collision detection: a sequence present in both
+    lab-generated AND external_public data is logged as a warning
+    (biologically interesting, NOT silently deduped)
   - Stable data_snapshot_hash (sha256 over sorted content)
   - Schema validation before returning
+
+Source-type tagging
+-------------------
+Every row produced by load_dataset() now carries a ``source_type`` column:
+  "lab_generated"   — real lab measurements (the default, always present)
+  "external_public" — rows from registered public databases (opt-in only)
+
+This tag is the critical provenance separator.  Downstream consumers
+(models, dashboard, auditor) can filter by source_type to compare or
+exclude external data without touching the lab data path.
 """
 
 from __future__ import annotations
@@ -35,8 +50,14 @@ from src.ingest.schema import validate_schema
 
 logger = logging.getLogger(__name__)
 
-# Columns that uniquely identify an observation
+# Columns that uniquely identify an observation WITHIN a provenance group
+# For deduplication WITHIN a source_type we use the pair below.
+# Cross-source collisions are handled separately (no silent dedup).
 _DEDUP_KEYS = ["peptide_sequence", "concentration"]
+
+# Source-type constants (keep in sync with external_datasets.py)
+_SOURCE_TYPE_LAB      = "lab_generated"
+_SOURCE_TYPE_EXTERNAL = "external_public"
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +68,7 @@ def load_dataset(
     disease_config: dict[str, Any],
     sources: list[str] | None = None,
     allow_synthetic: bool = False,
+    include_external: bool = False,
 ) -> pd.DataFrame:
     """Load, combine, deduplicate, and validate all source files.
 
@@ -64,13 +86,18 @@ def load_dataset(
         raises a RuntimeError — this is the hard guardrail preventing
         test-fixture data from entering a real training run.
         Set True only in test code.
+    include_external : bool
+        If False (default), external public datasets are NEVER loaded —
+        the pipeline operates exclusively on lab-generated data.  Set True
+        to also load all sources registered in config/external_sources.yaml.
+        This is always opt-in; external data is never silently mixed.
 
     Returns
     -------
     pd.DataFrame
         Long-format DataFrame with columns:
         [sequence_id, peptide_sequence, concentration, label_ordinal,
-         is_acetylated, source_file, data_snapshot_hash]
+         is_acetylated, source_file, source_type, data_snapshot_hash]
 
     Raises
     ------
@@ -95,7 +122,7 @@ def load_dataset(
         )
 
     # ------------------------------------------------------------------ #
-    # 2. Load each file, enforcing synthetic guardrail
+    # 2. Load each lab file, enforcing synthetic guardrail
     # ------------------------------------------------------------------ #
     frames: list[pd.DataFrame] = []
     for filepath in sources:
@@ -117,29 +144,54 @@ def load_dataset(
             )
 
         df = df.copy()
-        df["source_file"] = name
+        df["source_file"]  = name
+        df["source_type"]  = _SOURCE_TYPE_LAB
         frames.append(df)
 
-    combined = pd.concat(frames, ignore_index=True)
+    lab_combined = pd.concat(frames, ignore_index=True)
 
     # ------------------------------------------------------------------ #
-    # 3. Deduplication with conflict detection
+    # 3. (Optional) Load external public datasets
+    # ------------------------------------------------------------------ #
+    if include_external:
+        ext_frames = _load_all_external()
+        if ext_frames:
+            external_combined = pd.concat(ext_frames, ignore_index=True)
+            # Cross-source collision check BEFORE merging
+            _check_cross_source_collisions(lab_combined, external_combined)
+            combined = pd.concat([lab_combined, external_combined], ignore_index=True)
+        else:
+            logger.warning(
+                "load_dataset: include_external=True but no external datasets "
+                "could be loaded (check config/external_sources.yaml)."
+            )
+            combined = lab_combined
+    else:
+        combined = lab_combined
+
+    # ------------------------------------------------------------------ #
+    # 4. Deduplication with conflict detection
+    #    Operates within each (source_type, peptide_sequence, concentration)
+    #    group so external rows don't collapse lab rows.
     # ------------------------------------------------------------------ #
     combined = _deduplicate(combined)
 
     # ------------------------------------------------------------------ #
-    # 4. Stable snapshot hash
+    # 5. Stable snapshot hash
     # ------------------------------------------------------------------ #
     combined["data_snapshot_hash"] = _compute_hash(combined)
 
     # ------------------------------------------------------------------ #
-    # 5. Schema validation — nothing malformed exits this function
+    # 6. Schema validation — nothing malformed exits this function
+    #    External rows use concentration=0.0 (valid) and labels in {0, 3}.
+    #    label_ordinal in {0, 3} satisfies any 4-class schema's range [0..3].
     # ------------------------------------------------------------------ #
     validate_schema(combined, disease_config)
 
     logger.info(
-        "load_dataset complete: %d rows, hash=%s",
+        "load_dataset complete: %d rows (%s), hash=%s",
         len(combined),
+        _source_type_summary(combined),
         combined["data_snapshot_hash"].iloc[0],
     )
     return combined.reset_index(drop=True)
@@ -180,38 +232,105 @@ def _load_synthetic_file(
     return _real.load_real_peptide_data(filepath, disease_config=disease_config)
 
 
-def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicate (peptide_sequence, concentration) pairs.
+def _load_all_external() -> list[pd.DataFrame]:
+    """Load every source registered in external_sources.yaml.
 
-    Same pair, same label_ordinal → keep one row (true duplicate).
-    Same pair, different label_ordinal → KEEP BOTH, emit a warning.
-    Downstream code (researcher / agent) decides how to handle conflicts.
-
-    The source_file column is preserved to track provenance of conflicts.
+    Skips any source that fails (with a warning) so a broken URL for one
+    source doesn't block the others.  Returns a list of DataFrames (may
+    be empty if all sources fail).
     """
+    from src.ingest.external_datasets import (
+        list_available_sources,
+        load_external_dataset,
+    )
+
+    frames: list[pd.DataFrame] = []
+    for name in list_available_sources():
+        try:
+            df = load_external_dataset(name)
+            frames.append(df)
+            logger.info("_load_all_external: loaded %d rows from %s", len(df), name)
+        except Exception as exc:
+            logger.warning(
+                "_load_all_external: skipping %s — %s: %s",
+                name, type(exc).__name__, exc,
+            )
+    return frames
+
+
+def _check_cross_source_collisions(
+    lab_df: pd.DataFrame,
+    ext_df: pd.DataFrame,
+) -> None:
+    """Warn if any peptide_sequence appears in BOTH lab and external data.
+
+    This is biologically interesting (the same peptide was independently
+    assayed and published) but must NOT be silently deduplicated.  Both
+    rows are kept; the source_type column distinguishes them.
+    """
+    if ext_df.empty or lab_df.empty:
+        return
+
+    lab_seqs = set(lab_df["peptide_sequence"].dropna())
+    ext_seqs = set(ext_df["peptide_sequence"].dropna())
+    collisions = lab_seqs & ext_seqs
+
+    if collisions:
+        n = len(collisions)
+        sample = sorted(collisions)[:5]
+        msg = (
+            f"Cross-source collision detected: {n} peptide sequence(s) appear "
+            "in BOTH lab-generated AND external_public data.  Both rows are "
+            "KEPT (source_type distinguishes them) — this may be biologically "
+            "significant (independently validated peptides).\n"
+            f"Sample sequences: {sample}"
+        )
+        logger.warning(msg)
+        warnings.warn(msg, UserWarning, stacklevel=4)
+
+
+def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate (source_type, peptide_sequence, concentration) triples.
+
+    Same source_type + pair + label_ordinal → keep one row (true duplicate).
+    Same source_type + pair, different label_ordinal → KEEP BOTH, emit a warning.
+    Cross-source_type matches are NOT deduplicated here — handled by
+    _check_cross_source_collisions() before merging.
+
+    The source_file column is preserved for provenance of conflicts.
+    """
+    # Include source_type in dedup key so external rows are never collapsed
+    # into lab rows even if the peptide sequence string matches.
+    dedup_keys = _DEDUP_KEYS + (["source_type"] if "source_type" in df.columns else [])
+
     # Identify true duplicates: same keys AND same label → drop extras
     true_dup_mask = df.duplicated(
-        subset=_DEDUP_KEYS + ["label_ordinal"], keep="first"
+        subset=dedup_keys + ["label_ordinal"], keep="first"
     )
     n_true_dups = true_dup_mask.sum()
     if n_true_dups > 0:
         logger.info(
             "Dropped %d true duplicate rows "
-            "(same peptide_sequence + concentration + label_ordinal).",
+            "(same peptide_sequence + concentration + source_type + label_ordinal).",
             n_true_dups,
         )
     df = df[~true_dup_mask].copy()
 
     # Detect conflicts: same keys, different labels still in df
-    counts = df.groupby(_DEDUP_KEYS)["label_ordinal"].nunique()
+    counts = df.groupby(dedup_keys)["label_ordinal"].nunique()
     conflict_keys = counts[counts > 1].index
 
     if len(conflict_keys) > 0:
         conflict_details = []
-        for seq, conc in conflict_keys:
-            rows = df[
-                (df["peptide_sequence"] == seq) & (df["concentration"] == conc)
-            ][["peptide_sequence", "concentration", "label_ordinal", "source_file"]]
+        for key_vals in conflict_keys:
+            if not isinstance(key_vals, tuple):
+                key_vals = (key_vals,)
+            mask = True
+            for col, val in zip(dedup_keys, key_vals):
+                mask = mask & (df[col] == val)
+            rows = df[mask][[
+                "peptide_sequence", "concentration", "label_ordinal", "source_file"
+            ] + (["source_type"] if "source_type" in df.columns else [])]
             conflict_details.append(rows.to_string(index=False))
 
         conflict_summary = "\n---\n".join(conflict_details)
@@ -242,3 +361,11 @@ def _compute_hash(df: pd.DataFrame) -> str:
     # Convert to CSV bytes — deterministic, human-readable representation
     content = sorted_df.to_csv(index=False).encode("utf-8")
     return hashlib.sha256(content).hexdigest()
+
+
+def _source_type_summary(df: pd.DataFrame) -> str:
+    """Return a human-readable count-by-source_type summary string."""
+    if "source_type" not in df.columns:
+        return "source_type unknown"
+    counts = df["source_type"].value_counts().to_dict()
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))

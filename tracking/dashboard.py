@@ -191,6 +191,28 @@ df = _load(db_path, filter_disease, sort_by)
 if target_type_sel != "All" and not df.empty and "target_type" in df.columns:
     df = df[df["target_type"] == target_type_sel].reset_index(drop=True)
 
+# Source-type filter — distinguishes runs trained on lab-only vs lab+external data
+_SOURCE_TYPE_OPTIONS = ["All", "lab_generated", "external_public", "mixed"]
+source_type_sel = st.sidebar.selectbox(
+    "Training data source",
+    _SOURCE_TYPE_OPTIONS,
+    index=0,
+    help=(
+        "Filter by the source_type of the training data used:\n"
+        "• lab_generated — only real lab measurements (default, always safe)\n"
+        "• external_public — trained with opt-in public database data\n"
+        "• mixed — trained with both lab + external data\n"
+        "Rows without a source_type annotation are shown under 'All'."
+    ),
+)
+st.sidebar.caption(
+    "⚠ **lab_generated** and **external_public** metrics may not be directly "
+    "comparable — external data uses crude binary labels ({0, 3} only)."
+)
+
+if source_type_sel != "All" and not df.empty and "training_source_type" in df.columns:
+    df = df[df["training_source_type"] == source_type_sel].reset_index(drop=True)
+
 # ---------------------------------------------------------------------------
 # Summary metrics row
 # ---------------------------------------------------------------------------

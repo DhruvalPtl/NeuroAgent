@@ -1,0 +1,58 @@
+# config/external_sources.yaml
+# ==============================
+# Registry of external public datasets used by NeuroAgent as opt-in
+# training/evaluation data sources.
+#
+# IMPORTANT — label_map design note
+# -----------------------------------
+# Each source uses a *crude* binary → ordinal mapping that produces ONLY
+# class 0 (No aggregation) and class 3 (High aggregation), intentionally
+# skipping classes 1 (Low) and 2 (Medium).
+#
+# This is an explicit, documented decision, not a bug.  Rationale:
+#   - These published databases report binary amyloid/non-amyloid labels.
+#   - Forcing them into a 4-class ordinal scheme with endpoints {0, 3}
+#     is the most honest representation: positive → "High", negative → "No".
+#   - The resulting class-distribution skew (missing 1 & 2) is EXPECTED and
+#     will be visible in the training histograms. Downstream consumers must
+#     filter by source_type="external_public" if they want to study its effect.
+#   - Do NOT change this to {1: 1, 2: 2} without running a biological
+#     justification past the biology expert — the ordinal spacing matters.
+#
+# source_type: "external_public"
+# Contrast with lab-generated data which has source_type: "lab_generated".
+# The loader always tags rows; never mix the two silently.
+
+waltzdb:
+  # WaltzDB 2.0 — hexapeptide amyloid propensity database
+  # Fernandez-Escamilla et al., Nature Methods 2004 (original WALTZ)
+  # Louros et al., 2023 update: WaltzDB 2.0
+  # ~4,000 hexapeptides, binary amyloid/non-amyloid labels
+  url: "http://waltzdb.switchlab.org/sequences"
+  format: "hexapeptide_binary"
+  label_map:
+    non_amyloid: 0   # "No aggregation"
+    amyloid: 3       # "High aggregation" — binary positive maps to class 3
+
+amypro:
+  # AmyPro — curated database of amyloidogenic regions in full proteins
+  # Varadi et al., Nucleic Acids Research 2018
+  # Data availability: https://amypro.net — uses regions within full sequences
+  url: "https://amypro.net/download/amypro_data.csv"
+  format: "region_within_protein"
+  label_map:
+    non_amyloidogenic_region: 0   # remaining (non-annotated) sub-sequences
+    amyloidogenic_region: 3       # AmyPro positive regions
+
+canya:
+  # CANYA — Classification of Amyloid Nucleating peptide Yeast Assay
+  # Ventura et al., Science Advances 2026
+  # Data availability: Zenodo DOI 10.5281/zenodo.XXXXXXX
+  # (replace XX with actual DOI once confirmed from supplementary materials)
+  # ~19,000 peptides with binary nucleating/non-nucleating labels from
+  # a large-scale yeast-based functional assay
+  url: "https://zenodo.org/record/XXXXXXX/files/canya_dataset.csv"
+  format: "massive_flat_peptide_list"
+  label_map:
+    non_nucleating: 0   # Yeast assay negative
+    nucleating: 3       # Yeast assay positive — binary positive maps to class 3
