@@ -273,35 +273,63 @@ def _check_call(node: ast.Call) -> None:
 
 
 def _check_open_mode(call_node: ast.Call) -> None:
-    """Raise _SecurityViolation if open() is called with a write/append mode
-    OR if the path argument contains the vault directory name.
+    """Enforce file-open security rules on sandboxed open() calls.
 
-    Two separate checks:
-    1. Write-mode block: open(path, 'w') / open(path, mode='a') etc.
-    2. Vault path block: open('...holdout_vault/...') in any mode.
-       Sandboxed agent code must NEVER be able to read OR write vault files.
+    Three rules applied in order:
+
+    Rule 1 — Non-literal path BLOCK (fail-closed, the critical fix):
+        If the first positional argument (path) is NOT a bare string literal
+        (ast.Constant), the AST layer cannot statically verify the path is safe.
+        → REJECT with a clear error.
+
+        This closes the fail-open gap where os.path.join(...), "a"+"b"
+        concatenation, f-strings, or bare variable names silently bypassed the
+        vault check. The correct default is: deny unless provably safe, not
+        allow unless provably dangerous.
+
+        Sandboxed model code has no legitimate reason to construct file paths
+        dynamically — all I/O paths should be literal and statically auditable.
+
+    Rule 1a — Vault path BLOCK (case-insensitive literal check):
+        If the path IS a string literal, reject it if it contains
+        VAULT_DIR_NAME (case-insensitive). Vault files are human-access-only.
+
+    Rule 2 — Write-mode BLOCK:
+        Even for safe literal paths, write/append mode is not allowed.
     """
-    # ---- Check 1: extract path argument (first positional arg) ----
+    # ── Locate the path argument ──────────────────────────────────────────────
+    # Prefer first positional arg; fall back to `file=` keyword.
+    path_node: ast.expr | None = None
     if call_node.args:
-        first_arg = call_node.args[0]
-        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-            path_str: str = first_arg.value
-            if VAULT_DIR_NAME in path_str:
-                raise _SecurityViolation(
-                    f"Forbidden vault access: open({path_str!r}) — "
-                    f"paths containing '{VAULT_DIR_NAME}' are blocked in sandbox "
-                    "code.  The holdout vault is human-access-only."
-                )
-    # Also check keyword 'file' argument
-    for kw in call_node.keywords:
-        if kw.arg == "file" and isinstance(kw.value, ast.Constant):
-            if isinstance(kw.value.value, str) and VAULT_DIR_NAME in kw.value.value:
-                raise _SecurityViolation(
-                    f"Forbidden vault access: open(file={kw.value.value!r}) — "
-                    f"paths containing '{VAULT_DIR_NAME}' are blocked."
-                )
+        path_node = call_node.args[0]
+    else:
+        for kw in call_node.keywords:
+            if kw.arg == "file":
+                path_node = kw.value
+                break
 
-    # ---- Check 2: write/append mode ----
+    if path_node is not None:
+        # ── Rule 1: non-literal path → BLOCK ─────────────────────────────────
+        if not (isinstance(path_node, ast.Constant) and isinstance(path_node.value, str)):
+            expr_type = type(path_node).__name__
+            raise _SecurityViolation(
+                f"Dynamic/non-literal path argument to open() is not permitted in "
+                f"sandboxed code (got expression type '{expr_type}'). "
+                "Use a literal string path — every file path in sandbox code must "
+                "be statically auditable. Dynamic paths (variables, f-strings, "
+                "concatenation, os.path.join etc.) are blocked regardless of value."
+            )
+
+        # ── Rule 1a: literal vault path → BLOCK (case-insensitive) ───────────
+        path_str: str = path_node.value
+        if VAULT_DIR_NAME.lower() in path_str.lower():
+            raise _SecurityViolation(
+                f"Forbidden vault access: open({path_str!r}) — "
+                f"paths containing '{VAULT_DIR_NAME}' are blocked in sandbox "
+                "code. The holdout vault is human-access-only."
+            )
+
+    # ── Rule 2: write/append mode → BLOCK ────────────────────────────────────
     mode_value: str | None = None
     if len(call_node.args) >= 2:
         arg = call_node.args[1]
@@ -317,6 +345,7 @@ def _check_open_mode(call_node: ast.Call) -> None:
             f"Forbidden file write: open(..., mode={mode_value!r}) is not allowed. "
             "Sandbox code may only open files in read mode."
         )
+
 
 
 def _check_attribute(node: ast.Attribute) -> None:
