@@ -88,6 +88,19 @@ _DISEASE       = "alpha_synuclein"
 _LEADERBOARD   = {"macro_f1": 0.2054, "model": "esm2_coral", "target_type": "max_label"}
 
 
+# ---------------------------------------------------------------------------
+# Autouse fixture: silence literature_search for all tests in this file
+# (Step 2.7 added search_literature() to run_debate; existing debate tests
+#  don't need real search results, and we don't want DDG calls in fast tests)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _mock_literature_search():
+    """Return [] for all search_literature calls — graceful-degradation path."""
+    with patch("agent.debate.search_literature", return_value=[]):
+        yield
+
+
 # ===========================================================================
 # 1. run_debate() — call order and context passing
 # ===========================================================================

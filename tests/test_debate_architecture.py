@@ -35,8 +35,20 @@ from agent.debate import (
 )
 
 # ---------------------------------------------------------------------------
+# Autouse fixture: silence literature_search (Step 2.7) for all tests here
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _mock_literature_search():
+    """Return [] for search_literature — avoids DDG network calls in fast tests."""
+    with patch("agent.debate.search_literature", return_value=[]):
+        yield
+
+
+# ---------------------------------------------------------------------------
 # Shared fixtures: minimal working architecture code
 # ---------------------------------------------------------------------------
+
 
 _MINIMAL_ARCH_CODE = """\
 def __init__(self):

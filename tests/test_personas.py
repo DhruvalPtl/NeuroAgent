@@ -36,6 +36,8 @@ _DUMMY_LB      = '{"macro_f1": 0.36, "model": "random_forest"}'
 _DUMMY_BIO     = "The biology proposal text."
 _DUMMY_ML      = "The ML critique text."
 _DUMMY_STATS   = "The stats validation text. VERDICT: APPROVE"
+# Step 2.7: all personas now require this placeholder
+_DUMMY_LIT_CTX = "No literature context available this cycle."
 
 
 def _fill(persona: str) -> str:
@@ -46,7 +48,9 @@ def _fill(persona: str) -> str:
         biology_proposal=_DUMMY_BIO,
         ml_critique=_DUMMY_ML,
         stats_validation=_DUMMY_STATS,
+        literature_context=_DUMMY_LIT_CTX,
     )
+
 
 
 # ===========================================================================

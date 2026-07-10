@@ -5,13 +5,19 @@ System-prompt persona definitions for NeuroAgent's three-expert debate loop.
 
 Architecture design
 -------------------
-Each persona is a *template string* with two runtime-injected placeholders:
+Each persona is a *template string* with these runtime-injected placeholders:
   {disease}             — e.g. "alpha_synuclein", "tau", "tdp43", "tmem"
   {leaderboard_context} — stringified recent leaderboard dict
+  {literature_context}  — optional literature snippets from search_literature()
+                          (Step 2.7).  Always present as a string — if search
+                          returned nothing, the value is the sentinel:
+                          "No literature context available this cycle."
+                          This means callers MUST always pass this kwarg;
+                          debate.py provides it unconditionally.
 
-Keeping disease and leaderboard OUT of the baked-in strings means each
-persona is fully disease-agnostic and can be reused across experiments
-without modification.
+Keeping disease, leaderboard, and literature context OUT of the baked-in
+strings means each persona is fully disease-agnostic and reusable across
+experiments without modification.
 
 Debate flow
 -----------
@@ -19,6 +25,19 @@ Debate flow
   2. ML expert        → critiques the proposal from an ML feasibility lens
   3. Stats expert     → validates or flags statistical risks
   4. Arbiter          → synthesises ONE concrete, actionable consensus
+
+Literature enrichment (Step 2.7)
+---------------------------------
+BEFORE any LLM call, debate.py calls search_literature() 1-2 times:
+  - Biology-focused query: disease + "protein aggregation amyloid mechanism"
+  - ML-focused query:      best_model + "peptide aggregation prediction"
+The resulting snippets are injected into {literature_context}.  If search
+returns nothing (API unavailable, all results filtered, timeout), the slot
+gets the sentinel string and the debate proceeds normally.  A failed search
+NEVER blocks a debate cycle.
+
+The literature_context is also stored in the debate trail JSON so future
+analysts can see WHY the agent proposed what it did, not just what it proposed.
 
 Milestone 2 update
 ------------------
@@ -40,6 +59,7 @@ Usage in debate.py
     system = BIOLOGY_EXPERT_PERSONA.format(
         disease="tau",
         leaderboard_context=json.dumps(leaderboard, indent=2),
+        literature_context=literature_context_str,   # always provided
     )
 """
 
@@ -60,12 +80,17 @@ Current experimental context
 Disease protein:       {disease}
 Recent model results:  {leaderboard_context}
 
+Literature context (recent papers, trusted sources only)
+---------------------------------------------------------
+{literature_context}
+
 Your role
 ---------
 Propose a biologically-grounded hypothesis explaining WHY the current model \
 struggles (especially for class 3 "High" aggregation), and suggest what \
 biological features, PTM patterns, or disease-specific peptide properties \
-should be emphasised in the next experiment.
+should be emphasised in the next experiment.  You may draw on the literature \
+context above if relevant, but do not reproduce it verbatim.
 
 Focus on:
 - Known aggregation-prone sequence motifs for {disease}
@@ -97,6 +122,10 @@ Current experimental context
 -----------------------------
 Disease protein:       {disease}
 Recent model results:  {leaderboard_context}
+
+Literature context (recent papers, trusted sources only)
+---------------------------------------------------------
+{literature_context}
 
 The biology expert has proposed the following hypothesis:
 {biology_proposal}
@@ -179,6 +208,10 @@ Current experimental context
 Disease protein:       {disease}
 Recent model results:  {leaderboard_context}
 
+Literature context (recent papers, trusted sources only)
+---------------------------------------------------------
+{literature_context}
+
 The biology expert proposed:
 {biology_proposal}
 
@@ -226,6 +259,10 @@ Current experimental context
 -----------------------------
 Disease protein:       {disease}
 Recent model results:  {leaderboard_context}
+
+Literature context (recent papers, trusted sources only)
+---------------------------------------------------------
+{literature_context}
 
 Biology expert proposal:
 {biology_proposal}

@@ -57,6 +57,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agent.llm_client import call_llm
+from agent.literature_search import (
+    build_biology_query,
+    build_ml_query,
+    format_literature_context,
+    search_literature,
+)
 from agent.personas import (
     ARBITER_PERSONA,
     BIOLOGY_EXPERT_PERSONA,
@@ -112,6 +118,37 @@ _REQUIRED_ARCH_METHODS: frozenset[str] = frozenset({
 })
 
 
+def _get_best_model(leaderboard_context: dict) -> str:
+    """Extract the name of the best-performing model from leaderboard_context.
+
+    Used to build an ML-focused literature query that is anchored to the
+    model type actually showing promise, not a generic query.
+
+    Returns "machine learning" as a safe fallback if the context is empty or
+    the expected structure is absent — the query degrades gracefully rather
+    than crashing the debate.
+    """
+    if not leaderboard_context:
+        return "machine learning"
+    # leaderboard_context is a list-of-dicts or a dict with a "rows" / "entries" key
+    rows: list[dict] = []
+    if isinstance(leaderboard_context, list):
+        rows = leaderboard_context
+    elif isinstance(leaderboard_context, dict):
+        rows = leaderboard_context.get("rows", leaderboard_context.get("entries", []))
+
+    if not rows:
+        return "machine learning"
+
+    # Sort by macro_f1 descending; fall back to first row
+    try:
+        best = max(rows, key=lambda r: float(r.get("macro_f1", 0)))
+        model = best.get("model_name") or best.get("model") or "machine learning"
+        return str(model)
+    except Exception:
+        return "machine learning"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -155,10 +192,29 @@ def run_debate(
 
     logger.info("run_debate: starting — disease=%r, timestamp=%s", disease, timestamp)
 
-    # ── Step 1: Biology expert ───────────────────────────────────────────────
+    # ── Literature search (Step 2.7) ───────────────────────────────────────────
+    # Two lightweight queries; search_literature() NEVER raises — returns []
+    # on any failure.  A failed search degrades gracefully to the sentinel string.
+    bio_query  = build_biology_query(disease)
+    best_model = _get_best_model(leaderboard_context)
+    ml_query   = build_ml_query(best_model)
+
+    bio_lit_results = search_literature(bio_query, max_results=3)
+    ml_lit_results  = search_literature(ml_query,  max_results=2)
+
+    all_lit_results = bio_lit_results + ml_lit_results
+    literature_context_str = format_literature_context(all_lit_results)
+
+    logger.info(
+        "run_debate: literature search — bio=%d result(s), ml=%d result(s).",
+        len(bio_lit_results), len(ml_lit_results),
+    )
+
+    # ── Step 1: Biology expert ─────────────────────────────────────────────
     biology_system = BIOLOGY_EXPERT_PERSONA.format(
         disease=disease,
         leaderboard_context=lc_str,
+        literature_context=literature_context_str,
     )
     biology_proposal = call_llm(
         system_prompt=biology_system,
@@ -171,11 +227,12 @@ def run_debate(
     )
     logger.info("run_debate: biology proposal received (%d chars)", len(biology_proposal))
 
-    # ── Step 2: ML expert ────────────────────────────────────────────────────
+    # ── Step 2: ML expert ───────────────────────────────────────────────
     ml_system = ML_EXPERT_PERSONA.format(
         disease=disease,
         leaderboard_context=lc_str,
         biology_proposal=biology_proposal,
+        literature_context=literature_context_str,
     )
     ml_critique = call_llm(
         system_prompt=ml_system,
@@ -188,12 +245,13 @@ def run_debate(
     )
     logger.info("run_debate: ML critique received (%d chars)", len(ml_critique))
 
-    # ── Step 3: Stats expert ─────────────────────────────────────────────────
+    # ── Step 3: Stats expert ─────────────────────────────────────────────
     stats_system = STATS_EXPERT_PERSONA.format(
         disease=disease,
         leaderboard_context=lc_str,
         biology_proposal=biology_proposal,
         ml_critique=ml_critique,
+        literature_context=literature_context_str,
     )
     stats_validation = call_llm(
         system_prompt=stats_system,
@@ -205,13 +263,14 @@ def run_debate(
     )
     logger.info("run_debate: stats validation received (%d chars)", len(stats_validation))
 
-    # ── Step 4: Arbiter ──────────────────────────────────────────────────────
+    # ── Step 4: Arbiter ─────────────────────────────────────────────────
     arbiter_system = ARBITER_PERSONA.format(
         disease=disease,
         leaderboard_context=lc_str,
         biology_proposal=biology_proposal,
         ml_critique=ml_critique,
         stats_validation=stats_validation,
+        literature_context=literature_context_str,
     )
     arbiter_raw = call_llm(
         system_prompt=arbiter_system,
@@ -233,11 +292,12 @@ def run_debate(
     )
 
     return {
-        "proposal":   biology_proposal,
-        "critique":   ml_critique,
-        "validation": stats_validation,
-        "consensus":  consensus,
-        "timestamp":  timestamp,
+        "proposal":            biology_proposal,
+        "critique":            ml_critique,
+        "validation":          stats_validation,
+        "consensus":           consensus,
+        "literature_snippets": all_lit_results,   # stored for reproducibility
+        "timestamp":           timestamp,
     }
 
 
