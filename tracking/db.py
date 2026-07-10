@@ -67,6 +67,39 @@ CREATE TABLE IF NOT EXISTS experiments (
 );
 """
 
+# ---------------------------------------------------------------------------
+# Vault tables DDL — COMPLETELY SEPARATE from experiments.
+# get_leaderboard() queries ONLY experiments; vault tables are never joinable
+# into the agent feedback loop.
+# ---------------------------------------------------------------------------
+
+_DDL_VAULT = """
+CREATE TABLE IF NOT EXISTS vault_registry (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at       TEXT    NOT NULL,
+    disease          TEXT    NOT NULL,
+    seed             INTEGER NOT NULL,
+    vault_fraction   REAL    NOT NULL,
+    vault_path       TEXT    NOT NULL,
+    checksum_sha256  TEXT    NOT NULL,
+    vault_rows       INTEGER NOT NULL,
+    class_dist_json  TEXT    NOT NULL,
+    cluster_ids_json TEXT    NOT NULL,
+    git_commit       TEXT    NOT NULL DEFAULT 'unknown'
+);
+
+CREATE TABLE IF NOT EXISTS vault_scores (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    scored_at              TEXT    NOT NULL,
+    disease                TEXT    NOT NULL,
+    model_type             TEXT    NOT NULL,
+    vault_registry_id      INTEGER NOT NULL,
+    metrics_json           TEXT    NOT NULL,
+    high_class_recall_flag INTEGER NOT NULL DEFAULT 0,
+    git_commit             TEXT    NOT NULL DEFAULT 'unknown'
+);
+"""
+
 # Additive migrations — each is a guarded ALTER TABLE that is a no-op if the
 # column already exists.  SQLite has no "ADD COLUMN IF NOT EXISTS" syntax, so
 # we catch the OperationalError that signals the column already exists.
@@ -95,6 +128,8 @@ def init_db(db_path: str = "tracking/neuroagent.db") -> None:
 
     Idempotent — safe to call at the start of every pipeline run.  Uses
     ``CREATE TABLE IF NOT EXISTS`` so existing data is never touched.
+    Also creates vault_registry and vault_scores tables (separate from
+    experiments, never visible to get_leaderboard()).
 
     Parameters
     ----------
@@ -104,6 +139,7 @@ def init_db(db_path: str = "tracking/neuroagent.db") -> None:
     """
     with _connect(db_path) as conn:
         conn.executescript(_DDL)
+        conn.executescript(_DDL_VAULT)
         conn.commit()
         _run_migrations(conn)
     logger.info("init_db: schema initialised at %r", db_path)
@@ -246,6 +282,104 @@ def get_leaderboard(
     df["sort_value"] = df["metrics_json"].apply(_extract)
     df = df.sort_values("sort_value", ascending=False).reset_index(drop=True)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Vault-specific public functions
+# ---------------------------------------------------------------------------
+
+
+def log_vault_registry(
+    db_path: str = "tracking/neuroagent.db",
+    **fields: Any,
+) -> int:
+    """Insert one vault_registry record and return its id.
+
+    Required fields: disease, seed, vault_fraction, vault_path,
+    checksum_sha256, vault_rows, class_dist_json, cluster_ids_json.
+    Optional: created_at (auto-set), git_commit (auto-fetched).
+    """
+    fields = dict(fields)
+    fields.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    fields.setdefault("git_commit", _fetch_git_commit())
+
+    columns      = ", ".join(fields.keys())
+    placeholders = ", ".join("?" for _ in fields)
+    sql = f"INSERT INTO vault_registry ({columns}) VALUES ({placeholders})"
+
+    with _connect(db_path) as conn:
+        cur = conn.execute(sql, list(fields.values()))
+        conn.commit()
+        row_id: int = cur.lastrowid
+
+    logger.info(
+        "log_vault_registry: inserted id=%d (disease=%s, checksum=%s)",
+        row_id, fields.get("disease"), fields.get("checksum_sha256", "")[:12],
+    )
+    return row_id
+
+
+def log_vault_score(
+    db_path: str = "tracking/neuroagent.db",
+    **fields: Any,
+) -> int:
+    """Insert one vault_scores record and return its id.
+
+    Required fields: disease, model_type, vault_registry_id, metrics_json,
+    high_class_recall_flag.
+    Optional: scored_at (auto-set), git_commit (auto-fetched).
+
+    IMPORTANT: This writes to vault_scores, NOT experiments.
+    get_leaderboard() never touches this table.
+    """
+    fields = dict(fields)
+    fields.setdefault("scored_at", datetime.now(timezone.utc).isoformat())
+    fields.setdefault("git_commit", _fetch_git_commit())
+    if isinstance(fields.get("metrics_json"), dict):
+        fields["metrics_json"] = json.dumps(fields["metrics_json"])
+
+    columns      = ", ".join(fields.keys())
+    placeholders = ", ".join("?" for _ in fields)
+    sql = f"INSERT INTO vault_scores ({columns}) VALUES ({placeholders})"
+
+    with _connect(db_path) as conn:
+        cur = conn.execute(sql, list(fields.values()))
+        conn.commit()
+        row_id: int = cur.lastrowid
+
+    logger.info(
+        "log_vault_score: inserted id=%d (disease=%s, model=%s)",
+        row_id, fields.get("disease"), fields.get("model_type"),
+    )
+    return row_id
+
+
+def get_vault_manifest(
+    disease: str,
+    db_path: str = "tracking/neuroagent.db",
+) -> dict | None:
+    """Return the most recent vault_registry row for this disease, or None.
+
+    Returns a plain dict (not a Row object) for easy JSON serialisation.
+    Returns None if no vault has been built for this disease.
+    """
+    sql = (
+        "SELECT * FROM vault_registry "
+        "WHERE disease = ? "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    try:
+        with _connect(db_path) as conn:
+            conn.executescript(_DDL_VAULT)   # ensure table exists
+            conn.commit()
+            row = conn.execute(sql, [disease]).fetchone()
+    except Exception as exc:
+        logger.warning("get_vault_manifest: DB error — %s", exc)
+        return None
+
+    if row is None:
+        return None
+    return dict(row)
 
 
 # ---------------------------------------------------------------------------

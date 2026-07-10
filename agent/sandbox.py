@@ -162,6 +162,12 @@ _WRITE_MODES: frozenset[str] = frozenset({
     "w", "a", "x", "wb", "ab", "xb", "wt", "at", "xt",
 })
 
+#: The vault directory name blocked from ALL open() calls in sandboxed code
+#: (read AND write). This matches the VAULT_DIR_NAME constant in
+#: platform_core/holdout_vault.py. It is duplicated here intentionally so
+#: sandbox.py has zero import dependency on holdout_vault.py at module load.
+VAULT_DIR_NAME: str = "holdout_vault"
+
 #: Dunder attributes that are safe to access on any object (operator overloads
 #: and common class-body declarations).  All other dunders are blocked.
 _SAFE_DUNDERS: frozenset[str] = frozenset({
@@ -267,8 +273,36 @@ def _check_call(node: ast.Call) -> None:
 
 
 def _check_open_mode(call_node: ast.Call) -> None:
-    """Raise _SecurityViolation if open() is called with a write/append mode."""
-    mode_value: Optional[str] = None
+    """Raise _SecurityViolation if open() is called with a write/append mode
+    OR if the path argument contains the vault directory name.
+
+    Two separate checks:
+    1. Write-mode block: open(path, 'w') / open(path, mode='a') etc.
+    2. Vault path block: open('...holdout_vault/...') in any mode.
+       Sandboxed agent code must NEVER be able to read OR write vault files.
+    """
+    # ---- Check 1: extract path argument (first positional arg) ----
+    if call_node.args:
+        first_arg = call_node.args[0]
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            path_str: str = first_arg.value
+            if VAULT_DIR_NAME in path_str:
+                raise _SecurityViolation(
+                    f"Forbidden vault access: open({path_str!r}) — "
+                    f"paths containing '{VAULT_DIR_NAME}' are blocked in sandbox "
+                    "code.  The holdout vault is human-access-only."
+                )
+    # Also check keyword 'file' argument
+    for kw in call_node.keywords:
+        if kw.arg == "file" and isinstance(kw.value, ast.Constant):
+            if isinstance(kw.value.value, str) and VAULT_DIR_NAME in kw.value.value:
+                raise _SecurityViolation(
+                    f"Forbidden vault access: open(file={kw.value.value!r}) — "
+                    f"paths containing '{VAULT_DIR_NAME}' are blocked."
+                )
+
+    # ---- Check 2: write/append mode ----
+    mode_value: str | None = None
     if len(call_node.args) >= 2:
         arg = call_node.args[1]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
@@ -280,7 +314,7 @@ def _check_open_mode(call_node: ast.Call) -> None:
 
     if mode_value is not None and mode_value in _WRITE_MODES:
         raise _SecurityViolation(
-            f"Forbidden file write: open(..., mode='{mode_value}') is not allowed. "
+            f"Forbidden file write: open(..., mode={mode_value!r}) is not allowed. "
             "Sandbox code may only open files in read mode."
         )
 

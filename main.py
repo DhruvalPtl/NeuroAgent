@@ -223,6 +223,71 @@ def cmd_run_agent(args: argparse.Namespace) -> None:
     print("\n".join(lines))
 
 
+def cmd_score_holdout(args: argparse.Namespace) -> None:
+    """Score a model against the locked holdout vault (human-invoked only)."""
+    from platform_core.holdout_vault import score_against_vault, VaultIntegrityError
+
+    banner = [
+        "",
+        "=" * 62,
+        "  HOLDOUT VAULT SCORE",
+        "  (human-invoked — NOT used for agent feedback or leaderboard)",
+        "=" * 62,
+        f"  Disease  : {args.disease}",
+        f"  Model    : {args.model}",
+        "",
+    ]
+    print("\n".join(banner))
+
+    hyperparams: dict | None = None
+    if args.hyperparams:
+        try:
+            hyperparams = json.loads(args.hyperparams)
+        except json.JSONDecodeError as exc:
+            logger.error("--hyperparams must be valid JSON. Error: %s", exc)
+            sys.exit(1)
+
+    try:
+        metrics = score_against_vault(
+            model_name=args.model,
+            disease=args.disease,
+            hyperparams=hyperparams,
+            db_path=args.db_path,
+            test_size=args.test_size,
+            random_state=args.random_state,
+        )
+    except VaultIntegrityError as exc:
+        print(f"\n[VAULT INTEGRITY ERROR]\n{exc}\n")
+        sys.exit(2)
+    except FileNotFoundError as exc:
+        print(f"\n[VAULT NOT FOUND]\n{exc}\n")
+        sys.exit(2)
+
+    mf1  = metrics.get("macro_f1", 0.0)
+    qwk  = metrics.get("quadratic_weighted_kappa", 0.0)
+    flag = metrics.get("high_class_recall_flag", False)
+    pcr  = metrics.get("per_class_recall", {})
+    class_names = {0: "No", 1: "Low", 2: "Medium", 3: "High"}
+
+    lines = [
+        "-" * 62,
+        f"  VAULT Macro F1 : {mf1:.4f}   <- PRIMARY (vault, not leaderboard)",
+        f"  VAULT QWK      : {qwk:.4f}",
+        "-" * 62,
+        "  Per-class recall (vault):",
+    ]
+    for cls, name in class_names.items():
+        r = pcr.get(str(cls), pcr.get(cls, 0.0))
+        lines.append(f"    class {cls} ({name:6s}) : {r:.3f}")
+    lines.append("-" * 62)
+    if flag:
+        lines.append("  [!] HIGH-CLASS RECALL WARNING on vault (class-3 recall < 0.50)")
+    else:
+        lines.append("  [OK] High-class recall OK on vault")
+    lines += ["=" * 62, ""]
+    print("\n".join(lines))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neuroagent",
@@ -356,6 +421,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the SQLite tracking database (default: tracking/neuroagent.db)",
     )
     p_agent.set_defaults(func=cmd_run_agent)
+
+    # ---- score-holdout ----
+    p_vault = subparsers.add_parser(
+        "score-holdout",
+        help=(
+            "[HUMAN-ONLY] Score a model against the locked holdout vault. "
+            "Results go to vault_scores table ONLY — never to the agent leaderboard."
+        ),
+    )
+    p_vault.add_argument(
+        "--disease",
+        required=True,
+        metavar="DISEASE",
+        help="Disease name. Must have a vault built via build_vault().",
+    )
+    p_vault.add_argument(
+        "--model",
+        required=True,
+        metavar="MODEL",
+        help="Registered model key (random_forest, xgboost, esm2_coral).",
+    )
+    p_vault.add_argument(
+        "--hyperparams",
+        default=None,
+        metavar="JSON",
+        help='Optional JSON hyperparameters. Example: \'{"n_estimators": 200}\'',
+    )
+    p_vault.add_argument(
+        "--db-path",
+        default="tracking/neuroagent.db",
+        metavar="PATH",
+        help="SQLite tracking database (default: tracking/neuroagent.db)",
+    )
+    p_vault.add_argument(
+        "--test-size",
+        type=float,
+        default=0.2,
+        metavar="FRAC",
+        help="Fraction of non-vault pool for internal train split (default: 0.2)",
+    )
+    p_vault.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        metavar="SEED",
+        help="Random seed for train split within non-vault pool (default: 42)",
+    )
+    p_vault.set_defaults(func=cmd_score_holdout)
 
     return parser
 
